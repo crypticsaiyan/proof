@@ -1,0 +1,14 @@
+{
+  "name": "@proof/cli",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@proof/engine": "workspace:*",
+    "@proof/kane": "workspace:*",
+    "@proof/recorder": "workspace:*"
+  },
+  "bin": {
+    "proof": "./src/proof.ts"
+  }
+}

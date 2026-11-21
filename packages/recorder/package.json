@@ -1,0 +1,6 @@
+{
+  "name": "@proof/recorder",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts"
+}

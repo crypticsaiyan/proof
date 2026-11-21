@@ -1,0 +1,192 @@
+{
+  "id": "inc-checkout-negative-total",
+  "createdAt": "2026-11-18T08:32:00.000Z",
+  "source": "widget",
+  "project": "kiln-and-kettle",
+  "origin": "http://localhost:3100",
+  "report": "I used my welcome code on the tea tin and now I cannot place my order. It just says something went wrong.",
+  "reporter": {
+    "name": "Maya Chen",
+    "email": "maya@example.com"
+  },
+  "breadcrumbs": [
+    {
+      "t": 1794990721500,
+      "kind": "nav",
+      "url": "http://localhost:3100/"
+    },
+    {
+      "t": 1794990723700,
+      "kind": "click",
+      "text": "Stoneware Mug"
+    },
+    {
+      "t": 1794990725200,
+      "kind": "nav",
+      "url": "http://localhost:3100/product/stoneware-mug"
+    },
+    {
+      "t": 1794990727400,
+      "kind": "click",
+      "text": "Add to cart",
+      "context": "Stoneware Mug"
+    },
+    {
+      "t": 1794990728900,
+      "kind": "nav",
+      "url": "http://localhost:3100/cart"
+    },
+    {
+      "t": 1794990731100,
+      "kind": "click",
+      "text": "Shop"
+    },
+    {
+      "t": 1794990732600,
+      "kind": "nav",
+      "url": "http://localhost:3100/"
+    },
+    {
+      "t": 1794990734800,
+      "kind": "click",
+      "text": "Pour-over Kettle"
+    },
+    {
+      "t": 1794990736300,
+      "kind": "nav",
+      "url": "http://localhost:3100/product/pour-over-kettle"
+    },
+    {
+      "t": 1794990738500,
+      "kind": "click",
+      "text": "Shop"
+    },
+    {
+      "t": 1794990740000,
+      "kind": "nav",
+      "url": "http://localhost:3100/"
+    },
+    {
+      "t": 1794990742200,
+      "kind": "click",
+      "text": "Add to cart",
+      "context": "Tea Tin"
+    },
+    {
+      "t": 1794990743700,
+      "kind": "nav",
+      "url": "http://localhost:3100/cart"
+    },
+    {
+      "t": 1794990746800,
+      "kind": "input",
+      "label": "Quantity for Stoneware Mug",
+      "value": "0"
+    },
+    {
+      "t": 1794990749000,
+      "kind": "click",
+      "text": "Update",
+      "context": "Stoneware Mug"
+    },
+    {
+      "t": 1794990750500,
+      "kind": "nav",
+      "url": "http://localhost:3100/cart"
+    },
+    {
+      "t": 1794990753600,
+      "kind": "input",
+      "label": "Discount code",
+      "value": "SAVE10"
+    },
+    {
+      "t": 1794990755800,
+      "kind": "click",
+      "text": "Apply"
+    },
+    {
+      "t": 1794990757300,
+      "kind": "nav",
+      "url": "http://localhost:3100/cart"
+    },
+    {
+      "t": 1794990759500,
+      "kind": "click",
+      "text": "Remove",
+      "context": "SAVE10"
+    },
+    {
+      "t": 1794990761000,
+      "kind": "nav",
+      "url": "http://localhost:3100/cart"
+    },
+    {
+      "t": 1794990764100,
+      "kind": "input",
+      "label": "Discount code",
+      "value": "WELCOME20"
+    },
+    {
+      "t": 1794990766300,
+      "kind": "click",
+      "text": "Apply"
+    },
+    {
+      "t": 1794990767800,
+      "kind": "nav",
+      "url": "http://localhost:3100/cart"
+    },
+    {
+      "t": 1794990770000,
+      "kind": "click",
+      "text": "Checkout"
+    },
+    {
+      "t": 1794990771500,
+      "kind": "nav",
+      "url": "http://localhost:3100/checkout"
+    },
+    {
+      "t": 1794990774600,
+      "kind": "input",
+      "label": "Full name",
+      "value": "Maya Chen"
+    },
+    {
+      "t": 1794990777700,
+      "kind": "input",
+      "label": "Email for receipt",
+      "value": "maya@example.com"
+    },
+    {
+      "t": 1794990779900,
+      "kind": "click",
+      "text": "Place order"
+    },
+    {
+      "t": 1794990780800,
+      "kind": "rage",
+      "text": "Place order"
+    }
+  ],
+  "consoleErrors": [
+    {
+      "t": 1794990780240,
+      "text": "[checkout] failed: Internal error"
+    }
+  ],
+  "failedRequests": [
+    {
+      "t": 1794990780200,
+      "method": "POST",
+      "url": "http://localhost:3100/api/checkout",
+      "status": 500
+    }
+  ],
+  "viewport": {
+    "w": 1440,
+    "h": 900
+  },
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_6) Chrome/157"
+}

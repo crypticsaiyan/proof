@@ -1,0 +1,10 @@
+{
+  "name": "@proof/engine",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@proof/kane": "workspace:*",
+    "@proof/recorder": "workspace:*"
+  }
+}

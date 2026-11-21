@@ -1,0 +1,14 @@
+{
+  "name": "@proof/server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@hono/node-server": "^2.1.9",
+    "hono": "^4.13.19",
+    "@proof/engine": "workspace:*",
+    "@proof/kane": "workspace:*"
+  },
+  "scripts": {
+    "start": "node src/main.ts"
+  }
+}

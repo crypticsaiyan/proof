@@ -1,0 +1,8 @@
+{"marker": "step", "step": "0-1", "ordinal": 1}
+{"sequence": 0, "level": "error", "text": "Failed to load resource: the server responded with a status of 404 (Not Found)", "url": "http://localhost:3100/favicon.ico", "line": 0, "step": "0-1"}
+{"marker": "step", "step": "0-8", "ordinal": 8}
+{"sequence": 1, "level": "error", "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "url": "http://localhost:3100/api/checkout", "line": 0, "step": "0-8"}
+{"sequence": 2, "level": "error", "text": "[checkout] failed: Internal error", "url": "http://localhost:3100/checkout", "line": 90, "step": "0-8"}
+{"marker": "step", "step": "0-9", "ordinal": 9}
+{"sequence": 3, "level": "error", "text": "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "url": "http://localhost:3100/api/checkout", "line": 0, "step": "0-9"}
+{"sequence": 4, "level": "error", "text": "[checkout] failed: Internal error", "url": "http://localhost:3100/checkout", "line": 90, "step": "0-9"}

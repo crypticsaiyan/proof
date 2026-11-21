@@ -1,0 +1,15 @@
+{
+  "name": "@proof/sdk",
+  "private": true,
+  "type": "module",
+  "exports": "./dist/proof.js",
+  "scripts": {
+    "build": "node build.ts"
+  },
+  "dependencies": {
+    "rrweb": "^2.2.2"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

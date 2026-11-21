@@ -1,0 +1,23 @@
+{
+  "name": "proof",
+  "private": true,
+  "type": "module",
+  "description": "From broken user session to verified, merged fix. Kane CLI verifies every stage.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@10.20.0",
+  "scripts": {
+    "lint": "biome check .",
+    "format": "biome format --write .",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test 'packages/*/test/*.test.ts' 'apps/*/test/*.test.ts'",
+    "check": "pnpm lint && pnpm typecheck && pnpm test"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.8",
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
