@@ -70,12 +70,12 @@ test('card shows triple proof, minimal steps, tournament and disqualification', 
     testPath: 'tests/regressions/x_test.md',
     blast: [{ label: 'Matcha Whisk', affected: true }],
   });
-  assert.match(md, /RED before \(3\/3 Kane runs/);
+  assert.match(md, /RED before \(3\/3 Kane runs of the full 17-step session/);
   assert.match(md, /30 session events -> 17 steps -> 1 steps/);
   assert.match(md, /\*\*WINNER\*\*/);
   assert.match(md, /DISQUALIFIED/);
   assert.match(md, /`POST \/api\/checkout -> 500`/);
   assert.match(md, /!\[before\]\(https:\/\/x\/before\.gif\?raw=true\)/);
   assert.match(md, /Blast radius \(1\/1/);
-  assert.doesNotMatch(md, /—/, 'no em dashes');
+  assert.doesNotMatch(md, /\u2014/, 'no em dashes');
 });

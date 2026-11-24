@@ -1,7 +1,8 @@
 // The Proof Card: the PR body that carries the evidence. Pure function of the incident state.
 
 import type { Lock } from './lock.ts';
-import type { Entry, TournamentResult } from './tournament.ts';
+import { milestonesOf } from './milestones.ts';
+import { type Entry, type TournamentResult, winReason } from './tournament.ts';
 import type { Incident, Repro, RunRecord, TimelineEvent } from './types.ts';
 
 export type CardInput = {
@@ -10,6 +11,7 @@ export type CardInput = {
   repro: { verdict: string; hits: number; of: number };
   stepsBefore: number;
   minimal: Repro;
+  minimalConfirmed?: { hits: number; of: number };
   rca?: string;
   t: TournamentResult;
   runs: RunRecord[];
@@ -20,29 +22,30 @@ export type CardInput = {
   blast?: { label: string; affected: boolean }[];
 };
 
+const TZ = process.env.PROOF_TZ ?? 'Asia/Kolkata';
 const hhmm = (iso?: string) =>
   iso
-    ? new Date(iso).toLocaleTimeString('en-GB', {
+    ? new Date(iso).toLocaleString('en-GB', {
+        day: 'numeric',
+        month: 'short',
         hour: '2-digit',
         minute: '2-digit',
-        timeZone: process.env.TZ ?? 'Asia/Kolkata',
+        timeZone: TZ,
       })
-    : '?';
-
-const first = (tl: TimelineEvent[], ...stages: TimelineEvent['stage'][]) => tl.find((e) => stages.includes(e.stage))?.t;
+    : 'n/a';
 
 function entryRow(e: Entry, winner?: Entry): string {
   const result = e.tampered.length ? 'DISQUALIFIED' : e.passed ? (e === winner ? '**WINNER**' : 'pass') : 'fail';
   const suite = e.regressions.length
     ? `${e.regressions.filter((r) => r.status === 'passed').length}/${e.regressions.length}`
     : 'n/a';
-  return `| ${e.label} | ${result} | +${e.added} / -${e.removed} | ${e.judgeStatus ?? 'n/a'} | ${suite} | ${e.unit ? (e.unit.ok ? 'pass' : 'fail') : 'n/a'} | ${e.reason.replace(/\|/g, '/').slice(0, 120)} |`;
+  return `| ${e.label} | ${result} | +${e.added} / -${e.removed} | ${e.judgeStatus ?? 'n/a'} | ${suite} | ${e.unit ? (e.unit.ok ? 'pass' : 'fail') : 'n/a'} | ${e.review?.verdict ?? 'n/a'} | ${e.reason.replace(/\|/g, '/').slice(0, 120)} |`;
 }
 
 export function proofCard(c: CardInput): string {
   const { inc, t } = c;
   const w = t.winner;
-  const tl = c.timeline;
+  const ms = milestonesOf(c.timeline);
   const linkRun = (r?: RunRecord, label = 'Kane run') => (r?.testUrl ? `[${label}](${r.testUrl})` : label);
   const before = c.runs.find((r) => r.kind === 'reproduce' && r.matched);
   const after = c.runs.find((r) => r.id === w?.judgeRunId);
@@ -52,9 +55,9 @@ export function proofCard(c: CardInput): string {
   const lines = [
     `## Proof Card: ${inc.title ?? inc.id}`,
     '',
-    `> A user hit this at **${hhmm(first(tl, 'captured'))}**, reproduced **${hhmm(first(tl, 'reproduced', 'flaky'))}**, fixed **${hhmm(first(tl, 'fixed'))}**, verified **${hhmm(first(tl, 'verified'))}**. Every stage was checked by [Kane CLI](https://github.com/LambdaTest/kane-cli).`,
+    `> A user hit this at **${hhmm(ms.captured)}**, reproduced **${hhmm(ms.reproduced)}**, fixed **${hhmm(ms.fixed)}**, verified **${hhmm(ms.verified)}** (${TZ}). Every stage was checked by [Kane CLI](https://github.com/LambdaTest/kane-cli).`,
     '',
-    `**Triple proof:** RED before (${c.repro.hits}/${c.repro.of} Kane runs failed the same way) -> GREEN after (${w?.label ?? 'no winner'}) -> RED again when the fix is reverted${t.revert?.matched ? '' : ' (NOT CONFIRMED)'}.`,
+    `**Triple proof:** RED before (${c.repro.hits}/${c.repro.of} Kane runs of the full ${c.stepsBefore}-step session failed the same way${c.minimalConfirmed ? `, then ${c.minimalConfirmed.hits}/${c.minimalConfirmed.of} confirmation runs of the locked ${c.minimal.steps.length}-step repro` : ''}) -> GREEN after (${w?.label ?? 'no winner'}) -> RED again when the fix is reverted${t.revert?.matched ? '' : ' (NOT CONFIRMED)'}.`,
     '',
   ];
   if (c.media.beforeGif || c.media.afterGif) {
@@ -93,10 +96,10 @@ export function proofCard(c: CardInput): string {
   }
   lines.push(
     `### Fix tournament`,
-    `Each agent fixed the bug in its own git worktree off \`${t.base}@${t.baseSha.slice(0, 7)}\`. Kane judged every candidate: the locked repro must pass and the regression suite must stay green. Smallest passing diff wins.`,
+    `Each agent fixed the bug in its own git worktree off \`${t.base}@${t.baseSha.slice(0, 7)}\`. Kane judged every candidate: the locked repro must pass and the regression suite must stay green. Smallest passing diff wins; ties go to the faster agent.${w ? ` ${w.label} won: ${winReason(t.entries, w)}.` : ''}`,
     '',
-    '| Agent | Result | Diff | Kane repro | Kane suite | Unit | Notes |',
-    '|---|---|---|---|---|---|---|',
+    '| Agent | Result | Diff | Kane repro | Kane suite | Unit | Review | Notes |',
+    '|---|---|---|---|---|---|---|---|',
     ...t.entries.map((e) => entryRow(e, w)),
     '',
   );
@@ -106,12 +109,13 @@ export function proofCard(c: CardInput): string {
     `### Anti-cheat`,
     `- Repro hash-locked before any agent ran: \`sha256 ${(t.lock as Lock).sha256}\`. Judges re-check the hash before every run.`,
     `- Protected paths no agent may touch: checked on every diff; ${t.entries.filter((e) => e.tampered.length).length} disqualification(s).`,
-    `- Revert check: winning patch un-applied, Kane ${revert ? linkRun(revert, 'failed again') : 'failed again'} with \`${t.revert?.why ?? 'n/a'}\`.`,
+    `- Diff review: a model that does not see the agent's explanation checks that the patch removes the cause instead of hiding the error. It can be wrong; read the diff.`,
+    `- Revert check: winning patch un-applied, Kane ${t.revert?.matched ? linkRun(revert, 'failed again') : 'did NOT fail again'}: \`${t.revert?.why ?? 'n/a'}\`.`,
     '',
     `### Evidence`,
     `- Kane runs for this incident: ${c.runs.length} (${c.runs.reduce((n, r) => n + r.credits, 0).toFixed(0)} credits).`,
     c.pack
-      ? `- Sealed Kane evidence pack (merged before/after/revert): \`${c.pack.file}\`, \`kane-cli evidence validate\`: **${c.pack.valid ? 'valid' : 'invalid'}**.`
+      ? `- Kane evidence pack (before, after and revert merged with \`kane-cli evidence merge\`, local paths and account email redacted): \`${c.pack.file}\`, \`kane-cli evidence validate\`: **${c.pack.valid ? 'valid' : 'invalid'}**.`
       : '',
     c.dashboardUrl ? `- Incident timeline and videos: ${c.dashboardUrl}` : '',
     red ? '' : '- Note: reproduction was FLAKY, see the timeline.',

@@ -7,6 +7,7 @@ export * from './lock.ts';
 export * from './milestones.ts';
 export * from './minimize.ts';
 export * from './objective.ts';
+export * from './redact.ts';
 export * from './regression.ts';
 export * from './reproduce.ts';
 export * from './review.ts';

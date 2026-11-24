@@ -1,13 +1,14 @@
 // Ship: regression test into the repo, sealed evidence, media, PR with the Proof Card.
 // Post-deploy: Kane re-runs the locked repro on prod, then the reporter gets their own steps back.
 
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, writeFileSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { evidenceMerge, evidenceValidate, packTriage } from '@proof/kane';
 import { ffmpeg, sideBySide } from '@proof/recorder';
 import { proofCard } from './card.ts';
 import { assertLocked } from './lock.ts';
+import { redactPack, redactText } from './redact.ts';
 import { emit, incidentDir, listRuns, loadIncident, readJson, timeline, writeJson } from './store.ts';
 import { git } from './target.ts';
 import type { TournamentResult } from './tournament.ts';
@@ -71,7 +72,12 @@ export async function ship(id: string, opts: { repo: string; dashboardUrl?: stri
   const t = readJson<TournamentResult>(id, 'tournament.json');
   const w = t?.winner;
   if (!t || !w) throw new Error(`no winning fix for ${id}; run \`proof fix\` first`);
-  const minimal = readJson<{ repro: Repro; from: number }>(id, 'minimal.json');
+  if (!t.revert?.matched)
+    throw new Error(`revert check did not go red for ${id}; not shipping an unproven fix (run \`proof fix\` again)`);
+  const minimal = readJson<{ repro: Repro; from: number; confirmed?: { hits: number; of: number } }>(
+    id,
+    'minimal.json',
+  );
   const repro = readJson<{ verdict: string; hits: number; of: number; repro: Repro }>(id, 'repro.json');
   if (!minimal || !repro) throw new Error('missing repro/minimal');
   const runs = listRuns(id);
@@ -126,13 +132,19 @@ export async function ship(id: string, opts: { repo: string; dashboardUrl?: stri
     // kane-cli refuses to overwrite: merge to a fresh path, then swap it in (re-runs stay valid).
     const tmp = join(media, `.${id}.${process.pid}.evidence`);
     const m = await evidenceMerge(packs, `proof-${id}`, tmp, `Proof: ${inc.title ?? id}`);
-    if (m.ok) renameSync(tmp, out);
+    if (m.ok) {
+      // Only the redacted copy is ever published; the original stays in the run dirs.
+      const red = join(media, `.${id}.${process.pid}.redacted.evidence`);
+      await redactPack(tmp, red);
+      renameSync(red, out);
+      rmSync(tmp);
+    }
     const v = m.ok ? await evidenceValidate(out) : { valid: false };
     pack = { file: `${id}.evidence`, valid: v.valid };
     if (m.ok) add(out);
     emit(id, {
       stage: 'info',
-      message: `Evidence pack merged (${packs.length} Kane runs), validate: ${v.valid ? 'valid' : 'INVALID'}`,
+      message: `Evidence pack merged (${packs.length} Kane runs) and redacted, validate: ${v.valid ? 'valid' : 'INVALID'}`,
     });
   }
 
@@ -142,26 +154,29 @@ export async function ship(id: string, opts: { repo: string; dashboardUrl?: stri
   const base = await publishEvidence(opts.repo, nwo, id, files);
   const url = (f: string, raw = false) => `${base}/${f}${raw ? '?raw=true' : ''}`;
   const rca = before?.evidencePack ? (await packTriage(before.evidencePack)).rootCause : undefined;
-  const card = proofCard({
-    inc,
-    timeline: timeline(id),
-    repro,
-    stepsBefore: repro.repro.steps.length,
-    minimal: minimal.repro,
-    rca,
-    t,
-    runs,
-    media: {
-      beforeGif: existsSync(join(media, 'before.gif')) ? url('before.gif', true) : undefined,
-      afterGif: existsSync(join(media, 'after.gif')) ? url('after.gif', true) : undefined,
-      beforeMp4: existsSync(join(media, 'before.mp4')) ? url('before.mp4') : undefined,
-      afterMp4: existsSync(join(media, 'after.mp4')) ? url('after.mp4') : undefined,
-    },
-    pack: pack && { ...pack, file: url(pack.file) },
-    testPath: t.lock.repoPath,
-    blast: readJson<{ rows: { label: string; affected: boolean }[] }>(id, 'blast.json')?.rows,
-    dashboardUrl: opts.dashboardUrl ? `${opts.dashboardUrl}/incidents/${id}` : undefined,
-  });
+  const card = redactText(
+    proofCard({
+      inc,
+      timeline: timeline(id),
+      repro,
+      stepsBefore: repro.repro.steps.length,
+      minimal: minimal.repro,
+      minimalConfirmed: minimal.confirmed,
+      rca,
+      t,
+      runs,
+      media: {
+        beforeGif: existsSync(join(media, 'before.gif')) ? url('before.gif', true) : undefined,
+        afterGif: existsSync(join(media, 'after.gif')) ? url('after.gif', true) : undefined,
+        beforeMp4: existsSync(join(media, 'before.mp4')) ? url('before.mp4') : undefined,
+        afterMp4: existsSync(join(media, 'after.mp4')) ? url('after.mp4') : undefined,
+      },
+      pack: pack && { ...pack, file: url(pack.file) },
+      testPath: t.lock.repoPath,
+      blast: readJson<{ rows: { label: string; affected: boolean }[] }>(id, 'blast.json')?.rows,
+      dashboardUrl: opts.dashboardUrl ? `${opts.dashboardUrl}/incidents/${id}` : undefined,
+    }),
+  );
   writeFileSync(join(incidentDir(id), 'card.md'), card);
 
   const title = `fix: ${(inc.title ?? id).replace(/^fix:\s*/i, '')}`;
@@ -200,7 +215,25 @@ export async function ship(id: string, opts: { repo: string; dashboardUrl?: stri
   return { pr, card };
 }
 
-/** After deploy: Kane re-runs the locked repro on prod; on green, the reporter is notified. */
+/** POST the reply to PROOF_NOTIFY_WEBHOOK (mail relay, Slack, Zapier...). True only on a 2xx. */
+export async function deliver(note: { to?: string; name?: string; subject: string; body: string }): Promise<boolean> {
+  const hook = process.env.PROOF_NOTIFY_WEBHOOK;
+  if (!hook) return false;
+  try {
+    const { to, name, subject, body } = note;
+    const r = await fetch(hook, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ to, name, subject, body }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** After deploy: Kane re-runs the locked repro on prod; on green, the reporter's reply is prepared. */
 export async function verifyProd(id: string, prodUrl: string) {
   const inc = loadIncident(id);
   const t = readJson<TournamentResult>(id, 'tournament.json');
@@ -230,10 +263,14 @@ export async function verifyProd(id: string, prodUrl: string) {
       video: run.captioned ?? run.video,
       runId: run.id,
     };
-    writeJson(id, 'notify.json', note);
+    const delivered = await deliver(note);
+    writeJson(id, 'notify.json', { ...note, delivered });
+    const who = inc.reporter.name ?? 'the reporter';
     emit(id, {
-      stage: 'notified',
-      message: `Reporter ${inc.reporter.name ?? inc.reporter.email} notified with their exact steps passing on prod`,
+      stage: delivered ? 'notified' : 'info',
+      message: delivered
+        ? `Reply to ${who} handed to the notify webhook`
+        : `Reply to ${who} written, not sent (set PROOF_NOTIFY_WEBHOOK to deliver it)`,
     });
   }
   return run;
