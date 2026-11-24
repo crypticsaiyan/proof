@@ -1,9 +1,9 @@
 // Static snapshot of the dashboard (recorded runs + videos) for a backup deploy judges can open
 // without Kane, Chrome or agents. Usage: node apps/server/src/export.ts [outDir]
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { incidentDir, listIncidents } from '@proof/engine';
+import { incidentDir, listIncidents, redactText } from '@proof/engine';
 
 process.env.PROOF_STATIC = '1';
 const { createApp } = await import('./app.ts');
@@ -20,10 +20,11 @@ async function render(path: string): Promise<string> {
 function write(rel: string, html: string) {
   const f = join(out, rel, 'index.html');
   mkdirSync(dirname(f), { recursive: true });
-  writeFileSync(f, html);
+  writeFileSync(f, redactText(html));
 }
 
 write('', await render('/'));
+write('incidents', await render('/incidents'));
 let files = 0;
 for (const inc of listIncidents()) {
   const pageHtml = await render(`/incidents/${inc.id}`);
@@ -39,9 +40,10 @@ for (const inc of listIncidents()) {
       files++;
     }
   }
-  for (const extra of ['card.md', 'tournament.json', 'timeline.ndjson', 'media']) {
+  mkdirSync(join(out, 'files', inc.id), { recursive: true });
+  for (const extra of ['card.md', 'tournament.json', 'timeline.ndjson']) {
     const src = join(incidentDir(inc.id), extra);
-    if (existsSync(src)) cpSync(src, join(out, 'files', inc.id, extra), { recursive: true });
+    if (existsSync(src)) writeFileSync(join(out, 'files', inc.id, extra), redactText(readFileSync(src, 'utf8')));
   }
 }
 console.log(`exported ${listIncidents().length} incident(s), ${files} media file(s) to ${out}`);

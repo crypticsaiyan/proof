@@ -1,12 +1,32 @@
 import { spawn } from 'node:child_process';
-import { appendFileSync, createReadStream, existsSync, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { appendFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, statSync } from 'node:fs';
 import { dirname, extname, join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { type Incident, incidentDir, listIncidents, loadIncident, PROOF_DIR, timeline, triage } from '@proof/engine';
+import {
+  emit,
+  type Incident,
+  incidentDir,
+  listIncidents,
+  loadIncident,
+  PROOF_DIR,
+  timeline,
+  triage,
+} from '@proof/engine';
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
-import { home, incidentPage, loadState, page, reporterPage } from './views.ts';
+import { landing } from './landing.ts';
+import { fromSentry, validSignature } from './sentry.ts';
+import {
+  home,
+  incidentActions,
+  incidentCrumbs,
+  incidentPage,
+  loadState,
+  page,
+  reporterPage,
+  settled,
+} from './views.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const SDK = resolve(here, '../../../packages/sdk/dist/proof.js');
@@ -29,19 +49,32 @@ export function createApp() {
   app.use('/api/*', cors());
   app.use('/sdk.js', cors());
 
-  app.get('/', (c) => c.html(page('Incidents', home(listIncidents().map(loadState)))));
+  app.get('/', (c) => c.html(landing(listIncidents().map(loadState))));
+  app.get('/incidents', (c) => {
+    const nav = listIncidents().map(loadState);
+    return c.html(page('Incidents', home(nav), { nav }));
+  });
 
   app.get('/incidents/:id', (c) => {
     const id = c.req.param('id');
     if (!existsSync(join(incidentDir(id), 'incident.json'))) return c.notFound();
     const s = loadState(loadIncident(id));
-    return c.html(page(s.inc.title ?? id, incidentPage(s), { live: id }));
+    return c.html(
+      page(s.inc.title ?? id, incidentPage(s), {
+        live: id,
+        settled: settled(s),
+        nav: listIncidents().map(loadState),
+        current: id,
+        crumbs: incidentCrumbs(s),
+        actions: incidentActions(s),
+      }),
+    );
   });
 
   app.get('/r/:id', (c) => {
     const id = c.req.param('id');
     if (!existsSync(join(incidentDir(id), 'incident.json'))) return c.notFound();
-    return c.html(page('Fixed', reporterPage(loadState(loadIncident(id)))));
+    return c.html(reporterPage(loadState(loadIncident(id))));
   });
 
   app.get('/api/incidents', (c) => c.json(listIncidents()));
@@ -99,6 +132,23 @@ export function createApp() {
     return c.json({ id: r.incident.id, duplicateOf: r.duplicateOf ?? null, count: r.count });
   });
 
+  /** Sentry webhook. Requires SENTRY_WEBHOOK_SECRET: unsigned events never reach the pipeline. */
+  app.post('/api/webhooks/sentry', async (c) => {
+    const secret = process.env.SENTRY_WEBHOOK_SECRET;
+    if (!secret) return c.json({ error: 'set SENTRY_WEBHOOK_SECRET to enable' }, 503);
+    const text = await c.req.text();
+    if (!validSignature(text, c.req.header('sentry-hook-signature'), secret))
+      return c.json({ error: 'bad signature' }, 401);
+    let raw: ReturnType<typeof fromSentry> = null;
+    try {
+      raw = fromSentry(JSON.parse(text));
+    } catch {}
+    if (!raw) return c.json({ error: 'no event with a page URL' }, 400);
+    const r = await triage(raw);
+    if (!r.duplicateOf && process.env.PROOF_AUTORUN === '1') autorun(r.incident.id);
+    return c.json({ id: r.incident.id, duplicateOf: r.duplicateOf ?? null });
+  });
+
   /** rrweb chunks; text/plain from sendBeacon is accepted. */
   app.post('/api/sessions/:sid/events', async (c) => {
     const sid = c.req
@@ -134,6 +184,7 @@ function autorun(id: string) {
   const steps = [
     ['repro', id, ...(url ? ['--url', url] : [])],
     ...(repo ? [['fix', id, '--repo', repo]] : []),
+    ...(repo ? [['blast', id, ...(url ? ['--url', url] : [])]] : []),
     ...(repo && process.env.PROOF_AUTOSHIP === '1'
       ? [
           [
@@ -149,6 +200,11 @@ function autorun(id: string) {
   const script = steps
     .map((a) => [process.execPath, CLI, ...a].map((x) => `'${x.replace(/'/g, "'\\''")}'`).join(' '))
     .join(' && ');
-  const p = spawn('sh', ['-c', script], { stdio: ['ignore', 'ignore', 'inherit'], detached: true });
+  mkdirSync(incidentDir(id), { recursive: true });
+  const log = openSync(join(incidentDir(id), 'autorun.log'), 'a');
+  const p = spawn('sh', ['-c', script], { stdio: ['ignore', log, log], detached: true });
+  p.on('exit', (code) => {
+    if (code) emit(id, { stage: 'error', message: `Autorun stopped (exit ${code}); see autorun.log` });
+  });
   p.unref();
 }

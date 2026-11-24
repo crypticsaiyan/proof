@@ -1,14 +1,20 @@
-import { relative } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import {
   type Incident,
   incidentDir,
   listRuns,
+  type Milestones,
+  milestonesOf,
   type Repro,
   type RunRecord,
   readJson,
+  severityOf,
   type TimelineEvent,
   type TournamentResult,
   timeline,
+  winReason,
 } from '@proof/engine';
 import { html, raw } from 'hono/html';
 import { CSS, FONTS } from './styles.ts';
@@ -16,331 +22,469 @@ import { CSS, FONTS } from './styles.ts';
 type H = ReturnType<typeof html>;
 
 const TZ = process.env.PROOF_TZ ?? 'Asia/Kolkata';
-const hhmm = (iso?: string) =>
-  iso ? new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: TZ }) : '--:--';
-const hhmmss = (iso: string) =>
-  new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', timeZone: TZ });
-
-export function page(title: string, body: H | string, opts: { live?: string } = {}) {
-  return html`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${title} · Proof</title>
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="${FONTS}">
-<link rel="icon" href="data:image/svg+xml,${raw(encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 12"><rect width="10" height="6" fill="#c3362b"/><rect y="6" width="10" height="6" fill="#1d7a49"/></svg>'))}">
-<style>${raw(CSS)}</style>
-</head>
-<body>
-<div class="frame">
-<header class="top">
-  <a class="mark" href="/">proof<i></i></a>
-  <nav><a href="/">incidents</a><a href="https://github.com/crypticsaiyan/proof">github</a></nav>
-</header>
-<main>${body}</main>
-<footer><span>From broken user session to verified, merged fix. Kane CLI verifies every stage.</span><span>proof</span></footer>
-</div>
-${opts.live && process.env.PROOF_STATIC !== '1' ? raw(liveScript(opts.live)) : ''}
-</body>
-</html>`;
-}
-
-/** Re-render the page when the incident timeline grows (pipeline running). */
-function liveScript(id: string) {
-  return `<script>
-(() => {
-  let n = document.querySelectorAll('[data-ev]').length;
-  setInterval(async () => {
-    try {
-      const r = await fetch('/api/incidents/${id}/timeline');
-      const evs = await r.json();
-      if (evs.length !== n) location.reload();
-    } catch {}
-  }, 2000);
-})();
-</script>`;
-}
+const fmt = (iso: string, o: Intl.DateTimeFormatOptions) =>
+  new Date(iso).toLocaleString('en-GB', { ...o, timeZone: TZ });
+const hhmm = (iso?: string) => (iso ? fmt(iso, { hour: '2-digit', minute: '2-digit' }) : '');
+const hhmmss = (iso: string) => fmt(iso, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const day = (iso?: string) => (iso ? fmt(iso, { day: 'numeric', month: 'short' }) : '');
+export const when = (iso?: string) => (iso ? `${day(iso)}, ${hhmm(iso)}` : '');
+export const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString('en')} ${n === 1 ? one : many}`;
+const pathOf = (url: string, origin: string) => {
+  try {
+    return new URL(url, origin).pathname;
+  } catch {
+    return url;
+  }
+};
 
 export type IncidentState = {
   inc: Incident;
   tl: TimelineEvent[];
+  ms: Milestones;
   runs: RunRecord[];
   repro: { verdict: string; hits: number; of: number; repro: Repro } | null;
-  minimal: { repro: Repro; from: number; to: number; checks: number } | null;
+  minimal: {
+    repro: Repro;
+    from: number;
+    to: number;
+    checks: number;
+    confirmed?: { hits: number; of: number };
+  } | null;
+  /** The hash-locked test, byte for byte. */
+  lockedTest: string | null;
   t: TournamentResult | null;
   ship: { pr: string; evidence?: string } | null;
-  notify: { to?: string; name?: string; body: string; runId: string } | null;
+  notify: { name?: string; body: string; runId: string; delivered?: boolean } | null;
   blast: { rows: { label: string; dimension: string; affected: boolean; status: string }[] } | null;
 };
 
 export function loadState(inc: Incident): IncidentState {
+  const tl = timeline(inc.id);
+  const t = readJson<TournamentResult>(inc.id, 'tournament.json');
+  const test = join(incidentDir(inc.id), `${inc.id}_test.md`);
   return {
-    inc,
-    tl: timeline(inc.id),
+    inc: { ...inc, severity: inc.severity ?? severityOf(inc) },
+    tl,
+    ms: milestonesOf(tl),
+    lockedTest: existsSync(test) ? readFileSync(test, 'utf8') : null,
     runs: listRuns(inc.id),
     repro: readJson(inc.id, 'repro.json'),
     minimal: readJson(inc.id, 'minimal.json'),
-    t: readJson(inc.id, 'tournament.json'),
+    t,
     ship: readJson(inc.id, 'ship.json'),
     notify: readJson(inc.id, 'notify.json'),
     blast: readJson(inc.id, 'blast.json'),
   };
 }
 
-export function status(s: IncidentState): { text: string; cls: string } {
-  const has = (st: TimelineEvent['stage']) => s.tl.some((e) => e.stage === st);
-  if (has('prod_verified')) return { text: 'fixed in prod', cls: 'solid-pass' };
-  if (has('shipped')) return { text: 'pr open', cls: 'solid-pass' };
-  if (has('verified')) return { text: 'verified fix', cls: 'pass' };
-  if (has('fixing')) return { text: 'fixing', cls: 'warn' };
-  if (has('not_reproduced')) return { text: 'not reproduced', cls: 'muted' };
-  if (has('flaky')) return { text: 'flaky', cls: 'warn' };
-  if (has('reproduced')) return { text: 'reproduced', cls: 'solid-fail' };
-  if (has('reproducing')) return { text: 'reproducing', cls: 'fail' };
-  return { text: 'captured', cls: 'fail' };
+/** Nothing more will happen without a new run: the live page can stop polling. */
+export const settled = (s: IncidentState) => !!s.ms.prodVerified;
+
+export function status(s: IncidentState): { text: string; tone: '' | 'red' | 'green' | 'amber' } {
+  const m = s.ms;
+  const last = (...st: TimelineEvent['stage'][]) => s.tl.findLast((e) => st.includes(e.stage))?.stage;
+  if (m.reopened) return { text: 'Reopened', tone: 'amber' };
+  if (m.prodVerified) return { text: 'Fixed in prod', tone: 'green' };
+  if (m.shipped) return { text: 'PR open', tone: 'green' };
+  if (m.verified) return { text: 'Fix proven', tone: 'green' };
+  if (last('fixing', 'minimizing', 'reproducing') === 'fixing') return { text: 'Fixing', tone: 'amber' };
+  const r = last('reproducing', 'reproduced', 'flaky', 'not_reproduced');
+  if (r === 'not_reproduced') return { text: 'Not reproduced', tone: '' };
+  if (r === 'flaky') return { text: 'Flaky', tone: 'amber' };
+  if (r === 'reproduced') return { text: 'Reproduced', tone: 'red' };
+  if (r === 'reproducing') return { text: 'Reproducing', tone: 'red' };
+  return { text: 'Captured', tone: 'red' };
 }
+
+export const badge = (text: string, tone = '') => html`<span class="badge ${tone}">${text}</span>`;
 
 export const fileUrl = (id: string, abs?: string) =>
   abs ? `/files/${id}/${relative(incidentDir(id), abs)}` : undefined;
 
-const STAGES: [string, string, string][] = [
-  [
-    'capture',
-    'A script tag records the broken session',
-    'clicks, inputs, console errors, failed requests, rage clicks, a replay, and a "Report a bug" widget',
-  ],
-  [
-    'reproduce',
-    'Kane fails the same way, 3 of 3',
-    'the session becomes a Kane objective; the failure must match the user\'s signature, not just "something failed"',
-  ],
-  [
-    'minimize',
-    'Kane proves every remaining step matters',
-    '30 session events become the handful of steps that still break it',
-  ],
-  [
-    'tournament',
-    'Three agents fix it, Kane judges',
-    'Claude Code, Codex and a cheap model race in git worktrees; the repro is hash-locked so nobody can weaken it',
-  ],
-  [
-    'proof',
-    'Red before, green after, red on revert',
-    'the PR carries before/after video, the minimal repro as a regression test, and a sealed Kane evidence pack',
-  ],
+/** Pipeline milestones, in order. */
+export function milestones(s: IncidentState) {
+  const w = s.t?.winner;
+  const m = s.ms;
+  const reply = s.notify ? (s.notify.delivered ? 'Reporter told' : 'Reply written') : '';
+  return [
+    { label: 'Captured', at: m.captured ?? s.inc.createdAt, d: plural(s.inc.breadcrumbs.length, 'event') },
+    { label: 'Reproduced', at: m.reproduced, d: s.repro ? `${s.repro.hits}/${s.repro.of} Kane runs` : '' },
+    { label: 'Minimized', at: m.minimized, d: m.minimized && s.minimal ? plural(s.minimal.to, 'step') : '' },
+    { label: 'Fixed', at: m.fixed, d: m.fixed && w ? w.label : '' },
+    { label: 'Proven', at: m.verified, d: m.verified ? 'Red on revert' : '' },
+    { label: 'PR opened', at: m.shipped, d: m.shipped && s.ship?.pr ? `#${s.ship.pr.split('/').pop()}` : '' },
+    { label: 'Green in prod', at: m.prodVerified, d: m.reopened ? 'Then reopened' : m.prodVerified ? reply : '' },
+  ];
+}
+
+export function page(
+  title: string,
+  body: H,
+  opts: { live?: string; settled?: boolean; nav?: IncidentState[]; current?: string; crumbs?: H; actions?: H } = {},
+) {
+  const live = opts.live && process.env.PROOF_STATIC !== '1' && !opts.settled;
+  return html`<!doctype html>
+<html lang="en"${opts.settled ? raw(' data-settled="1"') : ''}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title} · Proof</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="${FONTS}">
+<link rel="icon" href="data:image/svg+xml,${raw(encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 12"><rect width="10" height="6" rx="1" fill="#dc2626"/><rect y="6" width="10" height="6" rx="1" fill="#15803d"/></svg>'))}">
+<style>${raw(CSS)}</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="app">
+  <aside class="side">
+    <a class="brand" href="/"><i aria-hidden="true"></i>Proof</a>
+    <div class="side-h"><span>Incidents</span><span class="num">${opts.nav?.length ?? 0}</span></div>
+    <nav aria-label="Incidents">${(opts.nav ?? []).map((s) => {
+      const st = status(s);
+      return html`<a class="item" href="/incidents/${s.inc.id}"${s.inc.id === opts.current ? raw(' aria-current="page"') : ''}><span class="dot ${st.tone}"></span><span class="t" title="${s.inc.title ?? s.inc.id}">${s.inc.title ?? s.inc.id}</span><span class="m">${st.text} · ${when(s.ms.captured ?? s.inc.createdAt)}</span></a>`;
+    })}</nav>
+    <div class="side-f"><a href="https://github.com/crypticsaiyan/proof">GitHub</a><a href="https://github.com/LambdaTest/kane-cli">Kane CLI</a></div>
+  </aside>
+  <div class="main">
+    <header class="topbar"><div class="crumbs">${opts.crumbs ?? html`<span>Overview</span>`}</div><div class="actions">${opts.actions ?? ''}</div></header>
+    <main id="main" class="content">${body}</main>
+  </div>
+</div>
+${live ? raw(liveScript(opts.live as string)) : ''}
+</body>
+</html>`;
+}
+
+/**
+ * While a pipeline runs, swap in the sections whose content changed. Sections with a playing
+ * video stay put, nothing reloads, and polling stops once the incident is settled.
+ */
+function liveScript(id: string) {
+  return `<script>
+(() => {
+  let n = ${'-1'};
+  const playing = (el) => [...el.querySelectorAll('video')].some((v) => !v.paused);
+  const swap = (sel, doc) => {
+    const cur = document.querySelector(sel), next = doc.querySelector(sel);
+    if (!cur || !next) return;
+    const old = new Map([...cur.children].map((el) => [el.dataset.k, el]));
+    cur.replaceChildren(...[...next.children].map((el) => {
+      const o = old.get(el.dataset.k);
+      return o && (o.innerHTML === el.innerHTML || playing(o)) ? o : el;
+    }));
+  };
+  const timer = setInterval(async () => {
+    try {
+      const evs = await (await fetch('/api/incidents/${id}/timeline')).json();
+      if (n === -1) { n = evs.length; return; }
+      if (evs.length === n) return;
+      n = evs.length;
+      const doc = new DOMParser().parseFromString(await (await fetch(location.href)).text(), 'text/html');
+      document.documentElement.classList.add('updated');
+      swap('main', doc);
+      document.querySelector('.side nav').innerHTML = doc.querySelector('.side nav').innerHTML;
+      document.querySelector('.actions').innerHTML = doc.querySelector('.actions').innerHTML;
+      document.title = doc.title;
+      if (doc.documentElement.dataset.settled) clearInterval(timer);
+    } catch {}
+  }, 2000);
+})();
+</script>`;
+}
+
+const FLOW: [string, string][] = [
+  ['Capture', 'A script tag records clicks, inputs, console errors and failed requests.'],
+  ['Reproduce', 'Kane must fail 3 of 3 times with the user’s own failure signature.'],
+  ['Minimize', 'Kane proves each remaining step is needed to trigger the bug.'],
+  ['Tournament', 'Coding agents fix it in separate worktrees. Kane judges each one.'],
+  ['Proof', 'Red before, green after, red again when the fix is reverted.'],
+  ['Prod', 'Kane re-runs the locked repro live and writes the reporter’s reply.'],
 ];
 
 export function home(states: IncidentState[]) {
-  return html`<section>
-  <p class="label">proof</p>
-  <h1>From broken user session to verified, merged fix.</h1>
-  <p class="muted" style="max-width:52rem">A user hits a bug. Proof captures the session, has <a href="https://github.com/LambdaTest/kane-cli">Kane CLI</a> reproduce it until it fails the same way, shrinks it, lets coding agents race to fix it, and makes Kane judge every fix. Agents never grade their own work.</p>
-  <div class="tl" style="margin-top:1.5rem">${STAGES.map(
-    ([k, t, d], i) =>
-      html`<div><div class="t">${i + 1}</div><div class="s">${k}</div><p style="margin:.6rem 0 .25rem;font-weight:700">${t}</p><p class="muted" style="margin:0;font-size:.75rem;line-height:1.6">${d}</p></div>`,
-  )}</div>
+  const runs = states.reduce((n, s) => n + s.runs.length, 0);
+  const credits = states.reduce((n, s) => n + s.runs.reduce((m, r) => m + r.credits, 0), 0);
+  const fixed = states.filter((s) => s.ms.prodVerified && !s.ms.reopened).length;
+  return html`<div class="head" data-k="head" style="--i:0">
+  <h1>Incidents</h1>
+  <p class="sub">Broken user sessions, reproduced, fixed and proven by Kane CLI.</p>
+</div>
+<section class="panel stats" data-k="stats" style="--i:1">
+  <div class="stat"><span>Incidents</span><b>${states.length}</b></div>
+  <div class="stat"><span>Fixed in prod</span><b>${fixed}</b></div>
+  <div class="stat"><span>Kane runs</span><b>${runs.toLocaleString('en')}</b></div>
+  <div class="stat"><span>Kane credits</span><b>${Math.round(credits).toLocaleString('en')}</b></div>
 </section>
-<section>
-  <p class="label">incidents</p>
+<section class="panel" data-k="list" style="--i:2">
+  <div class="panel-h"><h2>All incidents</h2><span class="aside">Newest first</span></div>
+  ${
+    states.length
+      ? html`<div class="scroll"><table>
+    <thead><tr><th>Incident</th><th>Status</th><th>Pipeline</th><th>Captured</th><th>Kane runs</th></tr></thead>
+    <tbody>${[...states].reverse().map((s) => {
+      const st = status(s);
+      const ms = milestones(s);
+      return html`<tr>
+      <td><a class="link" href="/incidents/${s.inc.id}" style="font-weight:500">${s.inc.title ?? s.inc.id}</a><br><span class="mono mute">${s.inc.id}</span></td>
+      <td>${badge(st.text, st.tone)}</td>
+      <td><span class="prog" aria-label="${ms.filter((m) => m.at).length} of ${ms.length} stages done">${ms.map((m, i) => html`<i class="${m.at ? (i === ms.length - 1 ? 'ok' : 'on') : ''}"></i>`)}</span></td>
+      <td class="nowrap mute">${when(ms[0].at)}</td>
+      <td class="num">${s.runs.length}</td>
+    </tr>`;
+    })}</tbody>
+  </table></div>`
+      : html`<div class="panel-b mute">No incidents yet. Add <code>&lt;script src="https://your-proof-server/sdk.js" data-project="my-app" defer&gt;&lt;/script&gt;</code> to an app.</div>`
+  }
 </section>
-<section>
-${
-  states.length
-    ? html`<div class="cards">${states.map((s) => {
-        const st = status(s);
-        const first = s.tl.find((e) => e.stage === 'captured')?.t ?? s.inc.createdAt;
-        return html`<a class="card" href="/incidents/${s.inc.id}">
-      <span class="big">${hhmm(first)}</span>
-      <span><b>${s.inc.title ?? s.inc.id}</b><br><span class="muted">${s.inc.project} · ${s.inc.severity ?? 'untriaged'} · ${s.inc.breadcrumbs.length} events · ${s.runs.length} Kane runs</span></span>
-      <span class="chip ${st.cls}">${st.text}</span>
-    </a>`;
-      })}</div>`
-    : html`<div class="empty">No incidents yet. Add the SDK to an app: <code>&lt;script src="${'{this server}'}/sdk.js" data-project="my-app" defer&gt;&lt;/script&gt;</code></div>`
-}
+<section class="panel" data-k="flow" style="--i:3">
+  <div class="panel-h"><h2>How a bug becomes a merged fix</h2><span class="aside">Kane CLI checks every stage</span></div>
+  <div class="flow">${FLOW.map(([name, text], i) => html`<div><span class="n">0${i + 1}</span><h3>${name}</h3><p>${text}</p></div>`)}</div>
 </section>`;
 }
 
-function stageCls(stage: TimelineEvent['stage']) {
-  if (['captured', 'reproducing', 'reproduced', 'error'].includes(stage)) return 'fail';
-  if (['fixed', 'verified', 'shipped', 'prod_verified', 'notified', 'locked'].includes(stage)) return 'pass';
-  if (stage === 'flaky') return 'warn';
-  return 'info';
+function stageTone(stage: TimelineEvent['stage']) {
+  if (['captured', 'reproducing', 'reproduced', 'error'].includes(stage)) return 'red';
+  if (['fixed', 'verified', 'shipped', 'prod_verified', 'notified', 'locked'].includes(stage)) return 'green';
+  if (stage === 'flaky') return 'amber';
+  return '';
 }
 
-function videoPanel(id: string, title: string, verdict: 'fail' | 'pass', run?: RunRecord, caption?: string) {
-  const src = fileUrl(id, run?.captioned ?? run?.video);
-  return html`<div class="term">
-  <div class="bar"><span><span class="dot ${verdict}"></span><b>${title}</b></span><span>${run ? `kane ${run.status} · ${run.durationS}s` : 'waiting'}</span></div>
-  ${src ? html`<video src="${`${src}#t=6`}" controls muted playsinline preload="metadata"></video>` : html`<div class="cap" style="padding:3rem 1rem;text-align:center">no recording yet</div>`}
-  <div class="cap">${caption ?? run?.oneLiner ?? ''}${run?.testUrl ? html` · <a href="${run.testUrl}" target="_blank" rel="noreferrer">Kane test run</a>` : ''}</div>
-</div>`;
+/** Last frame of a run video (where Kane's verdict shows), extracted once and cached beside it. */
+export function poster(video?: string): string | undefined {
+  if (!video) return undefined;
+  const out = video.replace(/\.mp4$/, '.poster.jpg');
+  if (!existsSync(out)) {
+    spawnSync(
+      'ffmpeg',
+      ['-y', '-loglevel', 'error', '-sseof', '-1.5', '-i', video, '-frames:v', '1', '-q:v', '4', out],
+      {
+        timeout: 15_000,
+      },
+    );
+  }
+  return existsSync(out) ? out : undefined;
+}
+
+function clip(id: string, o: { title: string; run?: RunRecord; text: H | string }) {
+  const video = o.run?.captioned ?? o.run?.video;
+  const src = fileUrl(id, video);
+  const still = fileUrl(id, poster(video));
+  return html`<figure class="clip" style="margin:0">
+  <div class="clip-h"><span style="display:flex;gap:10px;align-items:center"><b>${o.title}</b>${o.run ? badge(`Kane ${o.run.status}`, o.run.status === 'passed' ? 'green' : 'red') : badge('Waiting')}</span><span class="num">${o.run ? `${Math.round(o.run.durationS)}s` : ''}</span></div>
+  <div class="media">${src ? html`<video src="${src}" poster="${still ?? ''}" controls muted playsinline preload="none"></video>` : 'No recording yet'}</div>
+  <p>${o.text}${o.run?.testUrl ? html` <a class="link" href="${o.run.testUrl}" target="_blank" rel="noreferrer">Kane run</a>` : ''}</p>
+</figure>`;
+}
+
+/** The pipeline as a horizontal stepper (vertical on narrow screens). */
+export function stepper(s: IncidentState) {
+  const ms = milestones(s);
+  const failed = s.tl.at(-1)?.stage === 'error';
+  const firstPending = settled(s) || failed ? -1 : ms.findIndex((m) => !m.at);
+  return html`<ol class="stepper" style="--n:${ms.length};list-style:none;margin:0" aria-label="Pipeline">${ms.map(
+    (m, i) =>
+      html`<li style="--i:${i}" class="step ${m.at ? 'done' : i === firstPending ? 'active' : 'pending'}${i === ms.length - 1 ? ' final' : ''}"><span class="node"></span><span class="l">${m.label}</span><span class="d">${m.d || (m.at ? '' : i === firstPending ? 'Running' : 'Pending')}</span>${m.at ? html`<time datetime="${m.at}" title="${when(m.at)}">${i === 0 || day(m.at) !== day(ms[i - 1].at) ? when(m.at) : hhmm(m.at)}</time>` : ''}</li>`,
+  )}</ol>`;
+}
+
+export function incidentCrumbs(s: IncidentState) {
+  return html`<a href="/incidents">Incidents</a><span class="sep">/</span><span class="mono">${s.inc.id}</span>`;
+}
+
+export function incidentActions(s: IncidentState) {
+  return html`${s.notify ? html`<a class="btn" href="/r/${s.inc.id}">Reporter page</a>` : ''}${s.ship?.pr ? html`<a class="btn primary" href="${s.ship.pr}" target="_blank" rel="noreferrer">Pull request #${s.ship.pr.split('/').pop()}</a>` : ''}`;
 }
 
 export function incidentPage(s: IncidentState) {
   const { inc, tl, runs, t } = s;
   const id = inc.id;
-  const at = (...st: TimelineEvent['stage'][]) => tl.find((e) => st.includes(e.stage))?.t;
   const before = runs.find((r) => r.kind === 'reproduce' && r.matched) ?? runs.find((r) => r.kind === 'reproduce');
   const after = runs.find((r) => r.id === t?.winner?.judgeRunId);
   const revert = runs.find((r) => r.id === t?.revert?.runId);
   const prod = runs.findLast((r) => r.kind === 'prod');
+  const prodOk = !!prod && prod.status === 'passed' && !prod.matched;
   const st = status(s);
-  const milestones: [string, string | undefined][] = [
-    ['user hit bug', at('captured')],
-    ['reproduced', at('reproduced', 'flaky')],
-    ['minimized', at('minimized')],
-    ['fixed', at('fixed')],
-    ['verified', at('verified')],
-    ['pr opened', at('shipped')],
-    ['prod green', at('prod_verified')],
-  ];
   const credits = runs.reduce((n, r) => n + r.credits, 0);
+  const regs = t?.winner?.regressions ?? [];
+  const kinds = [...runs.reduce((m, r) => m.set(r.kind, (m.get(r.kind) ?? 0) + 1), new Map<string, number>())];
+  const KEY = new Set([
+    'captured',
+    'reproduced',
+    'flaky',
+    'minimized',
+    'locked',
+    'fixed',
+    'verified',
+    'shipped',
+    'prod_verified',
+    'notified',
+    'error',
+  ]);
 
-  return html`<section>
-  <p class="label">incident ${id} · ${inc.project} · ${inc.severity ?? 'untriaged'}</p>
+  return html`<div class="head" data-k="head" style="--i:0">
   <h1>${inc.title ?? 'Untitled incident'}</h1>
-  <p><span class="chip ${st.cls}">${st.text}</span> <span class="muted">${runs.length} Kane runs · ${credits.toFixed(0)} credits</span>
-  ${s.ship?.pr ? html` · <a href="${s.ship.pr}" target="_blank" rel="noreferrer"><b>pull request</b></a>` : ''}</p>
+  <div class="sub">${badge(st.text, st.tone)}<span>${inc.project}</span><span class="sep">·</span><span>${inc.severity ?? 'untriaged'}</span><span class="sep">·</span><span class="num">${plural(runs.length, 'Kane run')}, ${Math.round(credits).toLocaleString('en')} credits</span></div>
+</div>
+
+<section class="panel" data-k="pipeline" style="--i:1">
+  ${stepper(s)}
 </section>
 
-<section>
-  <p class="label">the timeline</p>
-  <div class="tl">${milestones.map(
-    ([label, t]) =>
-      html`<div class="${t ? '' : 'pending'}"><div class="t">${hhmm(t)}</div><div class="s">${label}</div></div>`,
-  )}</div>
-</section>
-
-<section class="grid2">
-  <div>
-    <p class="label">the report</p>
-    ${inc.report ? html`<blockquote>"${inc.report}"${inc.reporter?.name ? html`<br><span class="muted">${inc.reporter.name}</span>` : ''}</blockquote>` : html`<p class="muted">Captured automatically by the Proof SDK, no written report.</p>`}
-    <h3>What broke</h3>
-    <p>${inc.failedRequests.map((r) => html`<code class="fail">${r.method} ${new URL(r.url, inc.origin).pathname} ${r.status}</code><br>`)}
-    ${inc.consoleErrors.map((c) => html`<code class="fail">${c.text}</code><br>`)}</p>
-    <h3>The session (${inc.breadcrumbs.length} events)</h3>
-    <ol class="steps muted" style="font-size:.78rem;max-height:14rem;overflow:auto">${inc.breadcrumbs.map(
-      (b) =>
-        html`<li>${b.kind} ${b.text ? `"${b.text}"` : ''}${b.context ? ` (${b.context})` : ''}${b.label ? ` ${b.label}` : ''}${b.value !== undefined ? ` = "${b.value}"` : ''}${b.kind === 'nav' ? ` ${b.url ? new URL(b.url).pathname : ''}` : ''}</li>`,
-    )}</ol>
+<section class="panel" data-k="proof" style="--i:2">
+  <div class="panel-h"><h2>Triple proof</h2><span class="aside">${t?.revert?.matched ? 'Same failure before the fix and after reverting it' : 'Recorded from Kane’s browser'}</span></div>
+  <div class="proof">
+    ${clip(id, {
+      title: 'Before',
+      run: before,
+      text: s.repro
+        ? html`<b>${s.repro.hits}/${s.repro.of}</b> runs of the full session failed on main with the user’s signature.`
+        : 'Not reproduced yet.',
+    })}
+    ${clip(id, {
+      title: 'After',
+      run: after,
+      text: t?.winner
+        ? html`<b>${t.winner.label}</b>’s fix. Locked repro passes${regs.length ? html`, <b>${regs.filter((r) => r.status === 'passed').length}/${regs.length}</b> regression tests green` : ''}.`
+        : 'No passing fix yet.',
+    })}
+    ${clip(id, {
+      title: 'Fix reverted',
+      run: revert,
+      text: t?.revert
+        ? t.revert.matched
+          ? html`Fails again: <b>${t.revert.why.replace(/^same failed request: /, '')}</b>.`
+          : `Inconclusive: ${t.revert.why}`
+        : 'Runs once a fix wins.',
+    })}
   </div>
-  <div>
-    <p class="label">the repro</p>
+</section>
+
+<div class="cols" data-k="mid" style="--i:3">
+  <section class="panel">
+    <div class="panel-h"><h2>Minimal repro</h2>${t?.lock ? html`<span class="aside mono" title="sha256 ${t.lock.sha256}">locked ${t.lock.sha256.slice(0, 10)}</span>` : ''}</div>
     ${
       s.minimal
-        ? html`<h2>${inc.breadcrumbs.length} events → ${s.minimal.from} steps → ${s.minimal.to} steps</h2>
-      <ol class="steps">${s.minimal.repro.steps.map((x) => html`<li>${x.text}</li>`)}<li class="check">${s.minimal.repro.expectation}</li></ol>
-      <p class="muted">Delta-debugged with ${s.minimal.checks} Kane checks. ${t?.lock ? html`Hash-locked: <code>${t.lock.sha256.slice(0, 16)}…</code>` : ''}</p>`
+        ? html`<div class="panel-b" style="padding-bottom:var(--s3)"><div class="funnel"><b>${inc.breadcrumbs.length}</b> events <span>→</span> <b>${s.minimal.from}</b> steps <span>→</span> <b>${s.minimal.to}</b> steps</div><p class="mute" style="font-size:13px;margin-top:var(--s2)">Shrunk with ${plural(s.minimal.checks, 'Kane check')}${s.minimal.confirmed ? `, confirmed ${s.minimal.confirmed.hits}/${s.minimal.confirmed.of} on main` : ''}, saved as <code>${t?.lock?.repoPath.split('/').pop() ?? `${id}_test.md`}</code></p></div>
+    <ol class="steps" style="border-top:1px solid var(--line)">${s.minimal.repro.steps.map((x) => html`<li>${x.text}</li>`)}<li class="check">${s.minimal.repro.expectation}</li></ol>`
         : s.repro
           ? html`<ol class="steps">${s.repro.repro.steps.map((x) => html`<li>${x.text}</li>`)}<li class="check">${s.repro.repro.expectation}</li></ol>`
-          : html`<p class="muted">Not reproduced yet.</p>`
+          : html`<div class="panel-b mute">Not reproduced yet.</div>`
     }
-    ${s.repro ? html`<p><span class="chip ${s.repro.verdict === 'confirmed' ? 'solid-fail' : 'warn'}">${s.repro.verdict}</span> Kane failed the same way <b>${s.repro.hits}/${s.repro.of}</b> runs.</p>` : ''}
-  </div>
-</section>
+  </section>
+  <section class="panel">
+    <div class="panel-h"><h2>Fix tournament</h2>${t?.winner ? html`<span class="aside">${t.winner.label}: ${winReason(t.entries, t.winner)}</span>` : ''}</div>
+    ${
+      t
+        ? html`<div class="rows">${t.entries.map((e) => {
+            const win = e.agent === t.winner?.agent;
+            const tone = e.tampered.length || !e.passed ? 'red' : 'green';
+            const res = e.tampered.length ? 'Disqualified' : win ? 'Winner' : e.passed ? 'Passed' : 'Failed';
+            return html`<div class="row${win ? ' win' : ''}"><div class="k"><b style="font-weight:500">${e.label}</b> <span class="mono mute">+${e.added} -${e.removed}</span><small>${e.passed ? `Repro ${e.judgeStatus ?? 'n/a'}, suite ${e.regressions.filter((r) => r.status === 'passed').length}/${e.regressions.length}, unit ${e.unit ? (e.unit.ok ? 'pass' : 'fail') : 'n/a'}` : e.reason}</small></div>${badge(res, tone)}</div>`;
+          })}</div>
+    <p class="panel-b mute" style="font-size:13px;border-top:1px solid var(--line)">Smallest passing diff wins, ties go to the faster agent. Agents get the steps but cannot edit the locked test.</p>`
+        : html`<div class="panel-b mute">Starts after the repro is minimized.</div>`
+    }
+  </section>
+</div>
 
-<section>
-  <p class="label">the proof</p>
-  <div class="proof3">
-    <div><span class="dot fail"></span><b>red before</b><br><span class="muted">${s.repro ? `${s.repro.hits}/${s.repro.of} Kane runs fail on main` : 'pending'}</span></div>
-    <div><span class="dot pass"></span><b>green after</b><br><span class="muted">${t?.winner ? `${t.winner.label}'s fix, Kane passes + suite green` : 'pending'}</span></div>
-    <div><span class="dot fail"></span><b>red on revert</b><br><span class="muted">${t?.revert ? (t.revert.matched ? 'fix un-applied, Kane fails the same way again' : `inconclusive: ${t.revert.why}`) : 'pending'}</span></div>
-  </div>
-  <div class="grid3" style="margin-top:1.25rem">
-    ${videoPanel(id, 'before · main', 'fail', before)}
-    ${videoPanel(id, 'after · fix', 'pass', after)}
-    ${videoPanel(id, 'revert · fix removed', 'fail', revert)}
-  </div>
-</section>
-
-${
-  s.blast?.rows.length
-    ? html`<section>
-  <p class="label">the blast radius</p>
-  <h2>${s.blast.rows.filter((r) => r.affected).length} of ${s.blast.rows.length} variants hit the same bug</h2>
-  <table>
-    <tr><th>variant</th><th>changes</th><th>kane</th><th>impact</th></tr>
-    ${s.blast.rows.map(
-      (r) =>
-        html`<tr><td>${r.label}</td><td class="muted">${r.dimension}</td><td>${r.status}</td><td class="${r.affected ? 'fail' : 'pass'}"><b>${r.affected ? 'affected' : 'safe'}</b></td></tr>`,
-    )}
-  </table>
-</section>`
-    : ''
-}
-
-${
-  t
-    ? html`<section>
-  <p class="label">the fix tournament</p>
-  <table>
-    <tr><th>agent</th><th>result</th><th>diff</th><th>kane repro</th><th>kane suite</th><th>unit</th><th>notes</th></tr>
-    ${t.entries.map(
-      (e) => html`<tr class="${e === t.winner || e.agent === t.winner?.agent ? 'win' : ''}">
-      <td>${e.label}</td>
-      <td class="${e.tampered.length ? 'fail' : e.passed ? 'pass' : 'fail'}">${e.tampered.length ? 'disqualified' : e.agent === t.winner?.agent ? 'winner' : e.passed ? 'pass' : 'fail'}</td>
-      <td>+${e.added} / -${e.removed}</td>
-      <td>${e.judgeStatus ?? 'n/a'}</td>
-      <td>${e.regressions.length ? `${e.regressions.filter((r) => r.status === 'passed').length}/${e.regressions.length}` : 'n/a'}</td>
-      <td>${e.unit ? (e.unit.ok ? 'pass' : 'fail') : 'n/a'}</td>
-      <td class="muted">${e.reason}</td>
-    </tr>`,
-    )}
-  </table>
-</section>`
-    : ''
-}
+<div class="cols" data-k="case" style="--i:4">
+  <section class="panel">
+    <div class="panel-h"><h2>What the user saw</h2><span class="aside">${inc.source}</span></div>
+    <div class="panel-b">
+      ${inc.report ? html`<p class="quote">“${inc.report}”</p>${inc.reporter?.name ? html`<p class="who">${inc.reporter.name}</p>` : ''}` : html`<p class="mute">Captured by the Proof SDK, no written report.</p>`}
+      <div class="sig">${inc.failedRequests.map((r) => html`<code>${r.method} ${pathOf(r.url, inc.origin)} ${r.status}</code>`)}${inc.consoleErrors.map((c) => html`<code>${c.text}</code>`)}</div>
+    </div>
+    <details><summary>Captured session, ${plural(inc.breadcrumbs.length, 'event')}</summary><ol class="session">${inc.breadcrumbs.map(
+      (b) =>
+        html`<li>${b.kind}${b.text ? ` "${b.text}"` : ''}${b.context ? ` (${b.context})` : ''}${b.label ? ` ${b.label}` : ''}${b.value !== undefined ? ` = "${b.value}"` : ''}${b.kind === 'nav' && b.url ? ` ${pathOf(b.url, inc.origin)}` : ''}</li>`,
+    )}</ol></details>
+  </section>
+  <section class="panel">
+    <div class="panel-h"><h2>Blast radius</h2>${s.blast?.rows.length ? html`<span class="aside">${s.blast.rows.filter((r) => r.affected).length} of ${plural(s.blast.rows.length, 'variant')} affected</span>` : ''}</div>
+    ${
+      s.blast?.rows.length
+        ? html`<div class="rows">${s.blast.rows.map((r) => html`<div class="row"><div class="k">${r.label}<small>${r.dimension}</small></div>${r.affected ? badge('Affected', 'red') : badge('Safe', 'green')}</div>`)}</div>`
+        : html`<div class="panel-b mute">Kane runs variants of the repro (other products, codes, quantities) once it is minimized.</div>`
+    }
+  </section>
+</div>
 
 ${
   prod || s.notify
-    ? html`<section class="grid2">
-  <div>
-    <p class="label">after deploy</p>
-    ${videoPanel(id, 'production', prod?.status === 'passed' ? 'pass' : 'fail', prod, 'Kane re-ran the locked repro on production.')}
-  </div>
-  <div>
-    <p class="label">the reporter</p>
-    ${s.notify ? html`<blockquote style="border-left-color:var(--pass)">${s.notify.body}</blockquote><p><a href="/r/${id}">reporter's page</a></p>` : html`<p class="muted">Pending.</p>`}
-  </div>
-</section>`
+    ? html`<div class="cols" data-k="after" style="--i:5">
+  <section class="panel">
+    <div class="panel-h"><h2>Production</h2>${badge(prodOk ? 'Kane passed' : 'Kane failed', prodOk ? 'green' : 'red')}</div>
+    <div class="clip" style="border:0">${(() => {
+      const video = prod?.captioned ?? prod?.video;
+      const src = fileUrl(id, video);
+      return html`<div class="media" style="border-top:0">${src ? html`<video src="${src}" poster="${fileUrl(id, poster(video)) ?? ''}" controls muted playsinline preload="none"></video>` : 'No recording'}</div><p>The locked repro, re-run by Kane on the live site.${prod?.testUrl ? html` <a class="link" href="${prod.testUrl}" target="_blank" rel="noreferrer">Kane run</a>` : ''}</p>`;
+    })()}</div>
+  </section>
+  <section class="panel">
+    <div class="panel-h"><h2>Reporter</h2>${s.notify ? (s.notify.delivered ? badge('Delivered', 'green') : badge('Written, not sent')) : badge('Pending')}</div>
+    <div class="panel-b">${s.notify ? html`<p class="quote" style="font-size:14px">${s.notify.body}</p><p style="margin-top:var(--s4)"><a class="link" href="/r/${id}">Open the reporter’s page</a></p>` : html`<p class="mute">Sent after Kane passes on production.</p>`}</div>
+  </section>
+</div>`
     : ''
 }
 
-<section>
-  <p class="label">the log</p>
-  <div class="log">${tl.map(
-    (e) =>
-      html`<div data-ev><span class="muted">${hhmmss(e.t)}</span><span class="stage ${stageCls(e.stage)}">${e.stage.replace('_', ' ')}</span><span>${e.message}</span></div>`,
-  )}</div>
+<section class="panel" data-k="log" style="--i:6">
+  <div class="panel-h"><h2>Activity</h2><span class="aside">${plural(tl.length, 'event')}</span></div>
+  <div class="log">${[...tl]
+    .reverse()
+    .map(
+      (e) =>
+        html`<div data-ev><time datetime="${e.t}" title="${day(e.t)}">${hhmmss(e.t)}</time><span class="dot ${stageTone(e.stage)}"></span><span class="${KEY.has(e.stage) ? 'hi' : ''}">${e.message}</span></div>`,
+    )}</div>
 </section>
 
-<section>
-  <p class="label">every kane run</p>
-  <table>
-    <tr><th>run</th><th>kind</th><th>kane</th><th>same bug</th><th>time</th><th>credits</th><th></th></tr>
-    ${runs.map(
-      (r) => html`<tr>
-      <td>${r.label}</td><td>${r.kind}</td>
-      <td class="${r.status === 'passed' ? 'pass' : 'fail'}">${r.status}</td>
-      <td class="${r.matched ? 'fail' : ''}">${r.matched ? 'yes' : 'no'}</td>
-      <td>${r.durationS}s</td><td>${r.credits.toFixed(1)}</td>
-      <td>${r.testUrl ? html`<a href="${r.testUrl}" target="_blank" rel="noreferrer">kane</a>` : ''} ${r.video ? html`<a href="${fileUrl(id, r.captioned ?? r.video)}">video</a>` : ''}</td>
-    </tr>`,
-    )}
-  </table>
+<section class="panel" data-k="runs" style="--i:7">
+  <div class="panel-h"><h2>Kane runs</h2><span class="aside">${kinds.map(([k, n], i) => html`${i ? ' · ' : ''}<span class="num">${n}</span> ${k}`)}</span></div>
+  <details><summary>Show all ${plural(runs.length, 'run')}</summary>
+    <div class="scroll"><table>
+      <thead><tr><th>Run</th><th>Kind</th><th>Kane</th><th>Same bug</th><th>Time</th><th>Credits</th><th></th></tr></thead>
+      <tbody>${runs.map(
+        (r) => html`<tr>
+        <td>${r.label}</td><td class="mute">${r.kind}</td>
+        <td>${badge(r.status, r.status === 'passed' ? 'green' : 'red')}</td>
+        <td class="${r.matched ? 'red' : 'mute'}">${r.matched ? 'Yes' : 'No'}</td>
+        <td class="num nowrap">${Math.round(r.durationS)}s</td><td class="num">${r.credits.toFixed(1)}</td>
+        <td class="nowrap">${r.testUrl ? html`<a class="link" href="${r.testUrl}" target="_blank" rel="noreferrer">Kane</a>` : ''} ${r.video ? html`<a class="link" href="${fileUrl(id, r.captioned ?? r.video)}">Video</a>` : ''}</td>
+      </tr>`,
+      )}</tbody>
+    </table></div>
+  </details>
 </section>`;
 }
 
+/** The page the reporter gets: no console chrome, just their steps passing on the live site. */
 export function reporterPage(s: IncidentState) {
   const prod = s.runs.findLast((r) => r.kind === 'prod');
-  return html`<section>
-  <p class="label">your report</p>
-  <h1>Fixed. Here are your exact steps, working now.</h1>
-  ${s.inc.report ? html`<blockquote style="border-left-color:var(--pass)">"${s.inc.report}"</blockquote>` : ''}
-  <div style="max-width:60rem">${videoPanel(s.inc.id, 'your steps · live site', 'pass', prod, 'Recorded by Kane CLI on the production site after the fix shipped.')}</div>
-  ${s.minimal ? html`<h3 style="margin-top:1.5rem">The steps</h3><ol class="steps">${s.minimal.repro.steps.map((x) => html`<li>${x.text}</li>`)}</ol>` : ''}
-</section>`;
+  const video = prod?.captioned ?? prod?.video;
+  const src = fileUrl(s.inc.id, video);
+  return html`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fixed · Proof</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="${FONTS}">
+<style>${raw(CSS)}</style>
+</head>
+<body>
+<main class="solo">
+  <span class="brand"><i aria-hidden="true"></i>Proof</span>
+  <div class="head">${s.ms.reopened ? html`<p>${badge('Reopened', 'amber')}</p><h1>This was fixed and verified live, and has since been reopened. The recording below is from when it was fixed.</h1>` : html`<p>${badge('Fixed', 'green')}</p><h1>The problem you reported is fixed. Here are the steps that broke, working on the live site.</h1>`}</div>
+  ${s.inc.report ? html`<section class="panel panel-b"><p class="quote">“${s.inc.report}”</p><p class="who">You reported this on ${day(s.inc.createdAt)}</p></section>` : ''}
+  <section class="panel">
+    <div class="panel-h"><h2>Your steps, on the live site</h2>${prod ? badge('Kane passed', 'green') : badge('Pending')}</div>
+    <div class="media" style="border-top:0">${src ? html`<video src="${src}" poster="${fileUrl(s.inc.id, poster(video)) ?? ''}" controls muted playsinline preload="none"></video>` : 'Recording pending'}</div>
+    ${s.minimal ? html`<ol class="steps">${s.minimal.repro.steps.map((x) => html`<li>${x.text}</li>`)}</ol>` : ''}
+  </section>
+  <p class="mute" style="font-size:13px">Recorded by Kane CLI after the fix shipped.</p>
+</main>
+</body>
+</html>`;
 }
