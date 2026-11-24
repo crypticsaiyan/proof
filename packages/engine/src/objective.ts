@@ -51,7 +51,27 @@ export function toObjective(r: Repro): string {
   return lines.join('\n');
 }
 
-const asSteps = (texts: string[]): Step[] => texts.map((text, i) => ({ id: i + 1, text }));
+const MONEY = /[-−]?\s?(?:[$€£₹¥]\s?[-−]?\d[\d.,]*|\d[\d.,]*\s?(?:USD|EUR|GBP|INR))/g;
+
+/**
+ * A click label can carry state the bug itself produced ("Place order · -$2.01", "Cart (3)"). Left
+ * in, the locked test demands the buggy value and rejects every correct fix. Typed values are the
+ * user's input and stay exact.
+ */
+export function neutralStep(text: string): string {
+  const t = text.replace(/\(opens (\/[^\s?)]*)\?[^)]*\)/g, '(opens $1)');
+  if (!/^(click|press|tap|select)\b/i.test(t)) return t;
+  return t.replace(/"([^"]+)"/g, (all, label: string) => {
+    const clean = label
+      .replace(MONEY, '')
+      .replace(/\(\s*\d*\s*\)/g, '')
+      .replace(/\s{2,}/g, ' ')
+      .replace(/^[\s·•|:,\-–]+|[\s·•|:,\-–]+$/g, '');
+    return clean ? `"${clean}"` : all;
+  });
+}
+
+const asSteps = (texts: string[]): Step[] => texts.map((text, i) => ({ id: i + 1, text: neutralStep(text) }));
 
 export const GENERIC_EXPECTATION = 'Verify the last step completes successfully and no error message is shown';
 
@@ -86,7 +106,7 @@ const SCHEMA = {
 const RULES = `Rules for steps:
 - Each step is one short imperative browser action a test agent can do alone ("Click \\"Add to cart\\" for \\"Tea Tin\\"").
 - Keep every action that could change app state (cart, form values, codes, quantities). Drop pure scrolling/hover noise.
-- Keep the user's order. Use exact visible texts and typed values from the session.
+- Keep the user's order. Use exact visible texts and typed values from the session, but leave prices, totals and counts out of click labels.
 - Keep "(opens /path)" hints on clicks: they tell the agent which element was clicked (a link, not a button).
 - Do not include the start URL as a step; the run starts on it.
 The expectation is ONE "Verify ..." sentence describing what SHOULD happen if the app worked

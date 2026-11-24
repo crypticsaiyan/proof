@@ -5,7 +5,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { STRICT } from './objective.ts';
+import { neutralStep, STRICT } from './objective.ts';
 import { incidentDir, writeJson } from './store.ts';
 import type { Incident, Repro } from './types.ts';
 
@@ -30,7 +30,8 @@ ${STRICT} ${steps}. ${repro.expectation}
 `;
 }
 
-export function lockRepro(inc: Incident, repro: Repro, regressionsDir: string): Lock {
+export function lockRepro(inc: Incident, raw: Repro, regressionsDir: string): Lock {
+  const repro = { ...raw, steps: raw.steps.map((s) => ({ ...s, text: neutralStep(s.text) })) };
   const name = `${inc.id}_test.md`;
   const content = testmdFor(inc, repro);
   mkdirSync(incidentDir(inc.id), { recursive: true });

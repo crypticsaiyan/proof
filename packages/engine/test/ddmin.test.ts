@@ -57,3 +57,29 @@ test('shrink: over-wide hint is trimmed, wrong hint falls back to ddmin', async 
   assert.deepEqual(await shrink(items, [1, 2, 5, 7], fails, { key }), need);
   assert.deepEqual(await shrink(items, [1, 3], fails, { key }), need);
 });
+
+test('withNavigation re-inserts the click that reaches a step page', async () => {
+  const { withNavigation } = await import('../src/minimize.ts');
+  const all = [
+    { id: 1, text: 'Click "Add to cart" for "Tea Tin" (opens /cart)' },
+    { id: 2, text: 'Type "WELCOME20" into the "Discount code" field' },
+    { id: 3, text: 'Click "Apply"' },
+    { id: 4, text: 'Click "Checkout" (opens /checkout)' },
+    { id: 5, text: 'Type "maya@example.com" into the "Email for receipt" field' },
+    { id: 6, text: 'Click "Place order"' },
+  ];
+  const pick = (ids: number[]) => all.filter((s) => ids.includes(s.id));
+  assert.deepEqual(
+    withNavigation(pick([1, 2, 3, 5, 6]), all).map((s) => s.id),
+    [1, 2, 3, 4, 5, 6],
+  );
+  // Typing the code needs /cart: the add-to-cart click that lands there comes back.
+  assert.deepEqual(
+    withNavigation(pick([2, 3, 4, 5, 6]), all).map((s) => s.id),
+    [1, 2, 3, 4, 5, 6],
+  );
+  assert.deepEqual(
+    withNavigation(pick([1, 4, 6]), all).map((s) => s.id),
+    [1, 4, 6],
+  );
+});

@@ -3,7 +3,7 @@
 // run in parallel, each on its own Chrome.
 
 import { askJson, llmEnabled } from './llm.ts';
-import { cleanExpectation, toObjective } from './objective.ts';
+import { cleanExpectation, neutralStep, toObjective } from './objective.ts';
 import { emit, writeJson } from './store.ts';
 import type { Incident, Repro, RunRecord, Step } from './types.ts';
 import { incidentSignature, PARALLEL, pool, verify } from './verify.ts';
@@ -11,7 +11,15 @@ import { incidentSignature, PARALLEL, pool, verify } from './verify.ts';
 /** Extra Kane runs the final minimal repro must also fail. */
 const CONFIRM = 2;
 
-export type MinResult = { repro: Repro; from: number; to: number; checks: number; runs: RunRecord[] };
+export type MinResult = {
+  repro: Repro;
+  from: number;
+  to: number;
+  checks: number;
+  runs: RunRecord[];
+  /** Independent re-runs of the final script that hit the user's failure again. */
+  confirmed?: { hits: number; of: number };
+};
 
 /**
  * ddmin (Zeller): find a 1-minimal subsequence for which `fails` still holds. Order is kept.
@@ -110,11 +118,59 @@ Kane's root-cause analysis: ${kaneRca || '(none)'}`;
   }
 }
 
+/**
+ * Page model of a script: the path each step runs on, read from "(opens /path)" hints and
+ * "Go to <url>" steps. Kane starts on `/`.
+ */
+function pages(steps: Step[]) {
+  const on = new Map<number, string>();
+  const lands = new Map<number, string>();
+  let cur = '/';
+  for (const s of steps) {
+    on.set(s.id, cur);
+    const m = s.text.match(/\(opens (\/\S*?)\)|^Go to (\S+)/);
+    if (m) {
+      const target = m[1] ?? m[2];
+      try {
+        cur = target.startsWith('/') ? target : new URL(target).pathname;
+      } catch {}
+    }
+    lands.set(s.id, cur);
+  }
+  return { on, lands };
+}
+
+/**
+ * Re-insert the navigation a candidate needs to reach each step's page (e.g. "Click Checkout"
+ * before typing into a checkout field). Without this Kane may wander there by itself locally,
+ * the minimizer drops the click, and the locked test fails when followed strictly elsewhere.
+ */
+export function withNavigation(cand: Step[], all: Step[]): Step[] {
+  const { on, lands } = pages(all);
+  const out: Step[] = [];
+  let cur = '/';
+  const reach = (path: string, before: number, depth = 0) => {
+    if (cur === path || depth > 5) return;
+    const nav = [...all].reverse().find((s) => s.id < before && lands.get(s.id) === path && on.get(s.id) !== path);
+    if (!nav) return;
+    reach(on.get(nav.id) ?? '/', nav.id, depth + 1);
+    if (!out.includes(nav)) out.push(nav);
+    cur = path;
+  };
+  for (const s of cand) {
+    reach(on.get(s.id) ?? '/', s.id);
+    if (!out.includes(s)) out.push(s);
+    cur = lands.get(s.id) ?? cur;
+  }
+  return out;
+}
+
 export async function minimize(
   inc: Incident,
   start: Repro,
   opts: { url: string; maxChecks?: number; kaneRca?: string },
 ): Promise<MinResult> {
+  start = { ...start, steps: start.steps.map((s) => ({ ...s, text: neutralStep(s.text) })) };
   const expected = incidentSignature(inc);
   const expectation = cleanExpectation(start.expectation, start.steps);
   const cache = new Map<string, boolean>();
@@ -127,6 +183,11 @@ export async function minimize(
     const k = key(steps);
     const hit = cache.get(k);
     if (hit !== undefined) return hit;
+    // A script that skips a needed navigation is not a valid repro, whatever Kane does with it.
+    if (withNavigation(steps, start.steps).length !== steps.length) {
+      cache.set(k, false);
+      return false;
+    }
     if (runs.length >= maxChecks) return false;
     const run = await verify({
       incident: inc,
@@ -149,7 +210,8 @@ export async function minimize(
   };
 
   emit(inc.id, { stage: 'minimizing', message: `Delta-debugging ${start.steps.length} steps with Kane` });
-  const hint = await hintFor(inc, start, opts.kaneRca ?? '');
+  const raw = await hintFor(inc, start, opts.kaneRca ?? '');
+  const hint = raw && withNavigation(raw, start.steps);
   if (hint) emit(inc.id, { stage: 'info', message: `Model hint: steps ${key(hint)} look sufficient; Kane will check` });
   let cur = await shrink(start.steps, hint, check, {
     key,
@@ -188,15 +250,24 @@ export async function minimize(
     (c, i, all) => all.findIndex((d) => key(d) === key(c)) === i && c.length >= cur.length,
   );
   let final = start.steps;
+  let confirmation: MinResult['confirmed'];
   for (const cand of ladder.slice(0, 4)) {
     if (await confirmed(cand)) {
       final = cand;
+      if (cand.length < start.steps.length) confirmation = { hits: CONFIRM, of: CONFIRM };
       break;
     }
   }
   cur = final;
   const repro: Repro = { steps: cur, expectation };
-  const result: MinResult = { repro, from: start.steps.length, to: cur.length, checks: runs.length, runs };
+  const result: MinResult = {
+    repro,
+    from: start.steps.length,
+    to: cur.length,
+    checks: runs.length,
+    runs,
+    confirmed: confirmation,
+  };
   writeJson(inc.id, 'minimal.json', { ...result, runs: runs.map((r) => r.id) });
   emit(inc.id, {
     stage: 'minimized',
