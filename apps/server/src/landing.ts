@@ -308,8 +308,8 @@ export function landing(all: IncidentState[]) {
 </section>
 
 <section class="wrap closing">
-  <h2>See a bug Proof closed</h2>
-  <p>Every video, Kane run, diff and hash from one real incident, start to finish.</p>
+  <h2>Follow one bug all the way</h2>
+  <p>Videos, Kane runs, the minimal repro and the tournament from one captured session on the demo shop.</p>
   <div class="cta">${inc ? html`<a class="btn-l primary" href="/incidents/${inc.id}">Open the incident</a>` : ''}<a class="btn-l" href="/incidents">All incidents</a></div>
 </section>
 </main>

@@ -281,10 +281,12 @@ function clip(id: string, o: { title: string; run?: RunRecord; text: H | string 
 export function stepper(s: IncidentState) {
   const ms = milestones(s);
   const failed = s.tl.at(-1)?.stage === 'error';
-  const firstPending = settled(s) || failed ? -1 : ms.findIndex((m) => !m.at);
+  // After the PR, nothing runs until a person merges and deploys.
+  const waiting = !!s.ms.shipped && !s.ms.prodVerified;
+  const firstPending = settled(s) || failed || waiting ? -1 : ms.findIndex((m) => !m.at);
   return html`<ol class="stepper" style="--n:${ms.length};list-style:none;margin:0" aria-label="Pipeline">${ms.map(
     (m, i) =>
-      html`<li style="--i:${i}" class="step ${m.at ? 'done' : i === firstPending ? 'active' : 'pending'}${i === ms.length - 1 ? ' final' : ''}"><span class="node"></span><span class="l">${m.label}</span><span class="d">${m.d || (m.at ? '' : i === firstPending ? 'Running' : 'Pending')}</span>${m.at ? html`<time datetime="${m.at}" title="${when(m.at)}">${i === 0 || day(m.at) !== day(ms[i - 1].at) ? when(m.at) : hhmm(m.at)}</time>` : ''}</li>`,
+      html`<li style="--i:${i}" class="step ${m.at ? 'done' : i === firstPending ? 'active' : 'pending'}${i === ms.length - 1 ? ' final' : ''}"><span class="node"></span><span class="l">${m.label}</span><span class="d">${m.d || (m.at ? '' : i === firstPending ? 'Running' : waiting ? 'After merge' : 'Pending')}</span>${m.at ? html`<time datetime="${m.at}" title="${when(m.at)}">${i === 0 || day(m.at) !== day(ms[i - 1].at) ? when(m.at) : hhmm(m.at)}</time>` : ''}</li>`,
   )}</ol>`;
 }
 
