@@ -14,15 +14,22 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { runTestmd } from '@proof/kane';
 import { AGENTS, type AgentId, fixPrompt, runAgent } from './agents.ts';
 import { assertLocked, type Lock, lockRepro, tamperedCopy } from './lock.ts';
+import { runRegression } from './regression.ts';
+import { type Review, reviewPatch } from './review.ts';
 import { emit, incidentDir, writeJson } from './store.ts';
 import { diffAgainst, git, isProtected, loadConfig, type ProofConfig, sh, startApp } from './target.ts';
 import type { Incident, Repro, RunRecord } from './types.ts';
 import { incidentSignature, verify } from './verify.ts';
 
-export type RegressionResult = { test: string; status: string; durationS: number; shareUrl?: string };
+export type RegressionResult = {
+  test: string;
+  status: string;
+  durationS: number;
+  shareUrl?: string;
+  attempts?: number;
+};
 
 export type Entry = {
   agent: AgentId;
@@ -42,6 +49,10 @@ export type Entry = {
   judgeRunId?: string;
   judgeStatus?: string;
   judgeVideo?: string;
+  judgeAttempts?: number;
+  /** Kane hit the user's own failure while judging. */
+  hitBug?: boolean;
+  review?: Review;
   regressions: RegressionResult[];
   passed: boolean;
   reason: string;
@@ -56,7 +67,15 @@ export type TournamentResult = {
   revert?: { runId: string; status: string; matched: boolean; why: string; video?: string };
 };
 
-const sizeOf = (e: Entry) => e.added + e.removed;
+export const sizeOf = (e: Entry) => e.added + e.removed;
+
+/** How the winner won, in words that stay true when diffs tie. */
+export function winReason(entries: Entry[], w: Entry): string {
+  const tied = entries.filter((e) => e.passed && e.agent !== w.agent && sizeOf(e) === sizeOf(w));
+  return tied.length
+    ? `tied on diff size with ${tied.map((e) => e.label).join(' and ')}, faster to fix`
+    : 'smallest passing diff';
+}
 
 async function prepareWorktree(repo: string, dir: string, branch: string, base: string) {
   if (existsSync(dir)) await git(repo, 'worktree', 'remove', '--force', dir).catch(() => {});
@@ -84,8 +103,10 @@ function stageSuite(repo: string, cfg: ProofConfig, lock: Lock, into: string): s
 async function judge(
   inc: Incident,
   e: Entry,
-  ctx: { repo: string; base: string; cfg: ProofConfig; lock: Lock },
+  ctx: { repo: string; base: string; cfg: ProofConfig; lock: Lock; rca?: string },
 ): Promise<Entry> {
+  e.review = undefined;
+  e.hitBug = undefined;
   const d = await diffAgainst(e.worktree, ctx.base);
   e.files = d.files;
   e.added = d.added;
@@ -106,22 +127,16 @@ async function judge(
   try {
     const suite = stageSuite(ctx.repo, ctx.cfg, ctx.lock, join(incidentDir(inc.id), 'suite', `${e.agent}-r${e.round}`));
     const [run, regressions] = await Promise.all([
-      verify({
-        incident: inc,
-        kind: 'judge',
-        label: `${e.label} round ${e.round}`,
-        objective,
-        url: app.url,
-        expected: incidentSignature(inc),
-      }),
+      judgeRepro(inc, e, objective, app.url),
       Promise.all(
         suite.map(async (file): Promise<RegressionResult> => {
-          const r = await runTestmd(file, { url: app.url });
+          const r = await runRegression(file, app.url);
           return {
             test: file.split('/').pop() ?? file,
             status: r.status,
             durationS: r.durationS,
             shareUrl: r.shareUrl,
+            attempts: r.attempts,
           };
         }),
       ),
@@ -131,16 +146,43 @@ async function judge(
     e.judgeVideo = run.captioned ?? run.video;
     e.regressions = regressions;
     const redSuite = regressions.filter((r) => r.status !== 'passed');
+    e.judgeAttempts = run.attempts;
+    e.hitBug = run.matched;
     if (run.matched) return fail(e, `Kane still hits the bug: ${run.why}`);
     if (run.status !== 'passed') return fail(e, `Kane repro still fails: ${run.oneLiner || run.summary.slice(0, 200)}`);
     if (redSuite.length)
       return fail(e, `regression suite red: ${redSuite.map((r) => `${r.test} ${r.status}`).join(', ')}`);
     if (e.unit && !e.unit.ok) return fail(e, `unit tests fail: ${e.unit.tail.slice(-300)}`);
+    e.review = await reviewPatch(inc, d.patch, ctx.rca);
+    if (e.review.verdict === 'masks-symptom') return fail(e, `masks the symptom: ${e.review.why}`);
     e.passed = true;
-    e.reason = `repro green, ${regressions.length} regression test(s) green${e.unit ? ', unit green' : ''}`;
+    e.reason = `repro green${run.attempts > 1 ? ` on attempt ${run.attempts}` : ''}, ${regressions.length} regression test(s) green${e.unit ? ', unit green' : ''}${e.review.verdict === 'root-cause' ? ', review: root cause' : ', not reviewed'}`;
     return e;
   } finally {
     await app.stop();
+  }
+}
+
+/**
+ * A red run that does NOT show the user's failure is not a verdict on the fix (Kane skipped a field,
+ * timed out, or the script itself is wrong): run it once more. Hitting the user's bug is final.
+ */
+async function judgeRepro(inc: Incident, e: Entry, objective: string, url: string) {
+  for (let attempt = 1; ; attempt++) {
+    const run = await verify({
+      incident: inc,
+      kind: 'judge',
+      label: `${e.label} round ${e.round}${attempt > 1 ? ' (retry)' : ''}`,
+      objective,
+      url,
+      expected: incidentSignature(inc),
+    });
+    if (run.matched || run.status === 'passed' || attempt === 2) return { ...run, attempts: attempt };
+    emit(inc.id, {
+      stage: 'info',
+      message: `Kane could not finish the script judging ${e.label}, and the user's failure did not appear; judging once more`,
+      data: { runId: run.id },
+    });
   }
 }
 
@@ -178,7 +220,7 @@ export async function tournament(
     protectedPaths: cfg.protected,
     unit: cfg.unit,
   };
-  const ctx = { repo, base, cfg, lock };
+  const ctx = { repo, base, cfg, lock, rca: opts.rca };
 
   emit(inc.id, {
     stage: 'fixing',
@@ -219,6 +261,19 @@ export async function tournament(
       return j;
     }),
   );
+
+  // Independent fixes that all remove the user's failure yet cannot finish the script point at the
+  // script, not the fixes. Feeding that back would train agents to satisfy a wrong test.
+  const tried = entries.filter((e) => e.judgeRunId && !e.tampered.length);
+  if (tried.length >= 2 && tried.every((e) => e.hitBug === false && e.judgeStatus !== 'passed')) {
+    const result: TournamentResult = { base, baseSha, lock, entries };
+    writeJson(inc.id, 'tournament.json', result);
+    emit(inc.id, {
+      stage: 'error',
+      message: `Locked repro is suspect: ${tried.length} independent fixes removed the user's failure but none could finish the script. Not pushing agents to satisfy it (${tried[0].reason})`,
+    });
+    return result;
+  }
 
   // Closed loop: Kane's verdict goes back to agents that lost, once.
   for (let round = 2; round <= (opts.rounds ?? 2) && !entries.some((e) => e.passed); round++) {
