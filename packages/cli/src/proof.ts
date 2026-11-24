@@ -14,6 +14,7 @@ import {
   listRuns,
   loadIncident,
   minimize,
+  patchIncident,
   type Repro,
   type RunRecord,
   readJson,
@@ -38,6 +39,7 @@ Usage:
   proof fix <id> --repo <path> [--base main] [--agents claude,codex,haiku]
   proof ship <id> --repo <path> [--dashboard <url>] [--draft]
   proof verify-prod <id> --url <prod url>
+  proof reopen <id> --why <text> [--at <iso>]   the fix is no longer live
   proof hook-stop                         Claude Code Stop hook (reads hook JSON on stdin)
   proof steps <incident.json | id>        print the session as Kane steps (no Kane run)
   proof show <id>                         timeline + runs
@@ -67,7 +69,7 @@ async function cmdRepro(ref: string, url: string | undefined, doMin: boolean) {
   if (!inc.severity) {
     inc.clusterKey = clusterKey(inc);
     inc.severity = severityOf(inc);
-    saveIncident(inc);
+    patchIncident(inc.id, { clusterKey: inc.clusterKey, severity: inc.severity });
     emit(inc.id, { stage: 'triaged', message: `${inc.severity.toUpperCase()}: cluster ${inc.clusterKey}` });
   }
   const r = await reproduce(inc, { url: target });
@@ -137,6 +139,8 @@ async function main(): Promise<number> {
       agents: { type: 'string', default: 'claude,codex,haiku' },
       dashboard: { type: 'string' },
       draft: { type: 'boolean', default: false },
+      why: { type: 'string' },
+      at: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
     },
   });
@@ -171,6 +175,10 @@ async function main(): Promise<number> {
       const r = await verifyProd(arg, values.url);
       return r.status === 'passed' ? 0 : 1;
     }
+    case 'reopen':
+      loadIncident(arg);
+      emit(arg, { t: values.at, stage: 'reopened', message: `Reopened: ${values.why ?? 'fix no longer live'}` });
+      return 0;
     case 'hook-stop': {
       const chunks: Buffer[] = [];
       for await (const c of process.stdin) chunks.push(c as Buffer);
