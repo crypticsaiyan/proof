@@ -4,10 +4,11 @@
 // .claude/settings.json in the target repo:
 //   { "hooks": { "Stop": [ { "hooks": [ { "type": "command", "command": "proof hook-stop", "timeout": 900 } ] } ] } }
 
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { runTestmd } from '@proof/kane';
+import { execFile } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { promisify } from 'node:util';
+import { runRegression } from './regression.ts';
 import { git, loadConfig, sh, startApp } from './target.ts';
 import { pool } from './verify.ts';
 
@@ -16,20 +17,37 @@ export type StopDecision = { block: boolean; reason: string };
 
 const MAX_BLOCKS = Number(process.env.PROOF_HOOK_MAX_BLOCKS ?? 3);
 
+const exec = promisify(execFile);
+
+/**
+ * Content id of the whole working tree (untracked files included, .gitignore respected). What
+ * Kane writes while running the suite (`output-<test>/`, `.testmuai/`) is skipped.
+ */
+export async function workTree(cwd: string, gitDir: string, regressions: string): Promise<string> {
+  const index = join(gitDir, `proof-hook-index-${process.pid}`);
+  const env = { ...process.env, GIT_INDEX_FILE: index };
+  try {
+    await exec('git', ['add', '-A', '--', '.', `:(exclude)${regressions}/output-*`, ':(exclude).testmuai'], {
+      cwd,
+      env,
+    });
+    return (await exec('git', ['write-tree'], { cwd, env })).stdout.trim();
+  } finally {
+    rmSync(index, { force: true });
+  }
+}
+
 export async function stopHook(input: StopInput): Promise<StopDecision> {
   const cwd = input.cwd ?? process.cwd();
   if (!existsSync(join(cwd, 'proof.config.json'))) return { block: false, reason: 'no proof.config.json' };
   const cfg = loadConfig(cwd);
-  const stateDir = join(cwd, '.proof');
-  mkdirSync(stateDir, { recursive: true });
-  const stateFile = join(stateDir, 'hook-state.json');
+  // State lives in the git dir: a file in the work tree would itself change the tree.
+  const gitDir = resolve(cwd, (await git(cwd, 'rev-parse', '--git-dir')).trim());
+  const stateFile = join(gitDir, 'proof-hook.json');
   const state = existsSync(stateFile) ? JSON.parse(readFileSync(stateFile, 'utf8')) : {};
 
   // Skip when nothing changed since the last green run.
-  const tree = createHash('sha256')
-    .update(await git(cwd, 'diff', 'HEAD').catch(() => ''))
-    .update(await git(cwd, 'status', '--porcelain').catch(() => ''))
-    .digest('hex');
+  const tree = await workTree(cwd, gitDir, cfg.regressions);
   if (state.greenTree === tree) return { block: false, reason: 'unchanged since last green run' };
 
   const sessionBlocks = state.session === input.session_id ? (state.blocks ?? 0) : 0;
@@ -50,7 +68,7 @@ export async function stopHook(input: StopInput): Promise<StopDecision> {
   if (tests.length) {
     const app = await startApp(cwd, cfg);
     try {
-      const results = await pool(tests, 3, async (f) => ({ f, r: await runTestmd(join(dir, f), { url: app.url }) }));
+      const results = await pool(tests, 3, async (f) => ({ f, r: await runRegression(join(dir, f), app.url) }));
       for (const { f, r } of results) {
         if (r.status === 'passed') continue;
         const failed = r.steps.filter((s) => s.status === 'failed').map((s) => s.remark);
