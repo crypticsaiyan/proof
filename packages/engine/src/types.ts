@@ -21,7 +21,7 @@ export type FailedRequest = { t?: number; method: string; url: string; status: n
 export type Incident = {
   id: string;
   createdAt: string;
-  source: 'sdk' | 'widget' | 'sentry' | 'posthog' | 'fixture';
+  source: 'sdk' | 'widget' | 'sentry' | 'fixture';
   project: string;
   /** Origin the user was on, e.g. https://shop.example */
   origin: string;
@@ -94,6 +94,7 @@ export type TimelineEvent = {
     | 'shipped'
     | 'prod_verified'
     | 'notified'
+    | 'reopened'
     | 'error'
     | 'info';
   message: string;

@@ -2,7 +2,8 @@
 
 import { randomBytes } from 'node:crypto';
 import { askJson, llmEnabled } from './llm.ts';
-import { emit, listIncidents, saveIncident, writeJson } from './store.ts';
+import { milestonesOf } from './milestones.ts';
+import { emit, listIncidents, patchIncident, saveIncident, timeline, writeJson } from './store.ts';
 import type { Incident } from './types.ts';
 
 const pathOf = (url: string, origin: string) => {
@@ -45,6 +46,8 @@ export function severityOf(inc: Incident): 'critical' | 'major' | 'minor' {
 
 export const newIncidentId = () => `inc-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`;
 
+type Duplicate = Pick<Incident, 'replay' | 'report' | 'reporter'> & { at: string };
+
 export type TriageResult = { incident: Incident; duplicateOf?: string; count: number };
 
 /**
@@ -57,9 +60,14 @@ export async function triage(
   const inc: Incident = { ...raw, id: raw.id ?? newIncidentId(), createdAt: raw.createdAt ?? new Date().toISOString() };
   inc.clusterKey = clusterKey(inc);
   inc.severity = severityOf(inc);
-  const existing = listIncidents().find((i) => i.clusterKey === inc.clusterKey && i.id !== inc.id);
+  // Only open incidents absorb duplicates: the same failure after a verified fix is a regression.
+  const existing = listIncidents().find((i) => {
+    if (i.id === inc.id || (i.clusterKey ?? clusterKey(i)) !== inc.clusterKey) return false;
+    const m = milestonesOf(timeline(i.id));
+    return !m.prodVerified || !!m.reopened;
+  });
   if (existing) {
-    const dupes = ((existing as Incident & { duplicates?: unknown[] }).duplicates ?? []) as unknown[];
+    const dupes = (existing as Incident & { duplicates?: Duplicate[] }).duplicates ?? [];
     dupes.push({ at: inc.createdAt, report: inc.report, reporter: inc.reporter, replay: inc.replay });
     const updated = { ...existing, duplicates: dupes } as Incident;
     if (!updated.report && inc.report) {
@@ -67,8 +75,15 @@ export async function triage(
       updated.reporter = inc.reporter;
     }
     saveIncident(updated);
-    emit(existing.id, { stage: 'triaged', message: `Duplicate report folded in (${dupes.length + 1} users hit this)` });
-    return { incident: updated, duplicateOf: existing.id, count: dupes.length + 1 };
+    const sessions = new Set([existing.replay ?? existing.id, ...dupes.map((d, i) => d.replay ?? `unknown-${i}`)]);
+    const same = !!inc.replay && inc.replay === existing.replay;
+    emit(existing.id, {
+      stage: 'triaged',
+      message: same
+        ? 'The same user added a written report'
+        : `Duplicate report folded in (${sessions.size} sessions hit this)`,
+    });
+    return { incident: updated, duplicateOf: existing.id, count: sessions.size };
   }
   saveIncident(inc);
   emit(inc.id, {
@@ -90,8 +105,8 @@ Last actions: ${inc.breadcrumbs
         { type: 'object', properties: { title: { type: 'string' } }, required: ['title'] },
         { timeoutMs: 30_000 },
       );
-      inc.title = r.title;
-      saveIncident(inc);
+      // A widget report can land while the model is thinking: only set the title.
+      Object.assign(inc, patchIncident(inc.id, { title: r.title }));
     } catch {}
   }
   emit(inc.id, {

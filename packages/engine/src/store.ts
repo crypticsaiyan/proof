@@ -18,6 +18,13 @@ export function loadIncident(id: string): Incident {
   return JSON.parse(readFileSync(join(incidentDir(id), 'incident.json'), 'utf8'));
 }
 
+/** Change some fields of a stored incident. Re-reads first: the server and the CLI both write. */
+export function patchIncident(id: string, patch: Partial<Incident>): Incident {
+  const next = { ...loadIncident(id), ...patch };
+  saveIncident(next);
+  return next;
+}
+
 export function listIncidents(): Incident[] {
   const root = join(PROOF_DIR, 'incidents');
   if (!existsSync(root)) return [];
@@ -28,7 +35,7 @@ export function listIncidents(): Incident[] {
 }
 
 export function emit(incidentId: string, ev: Omit<TimelineEvent, 't'> & { t?: string }): TimelineEvent {
-  const full = { t: new Date().toISOString(), ...ev } as TimelineEvent;
+  const full = { ...ev, t: ev.t ?? new Date().toISOString() } as TimelineEvent;
   mkdirSync(incidentDir(incidentId), { recursive: true });
   appendFileSync(join(incidentDir(incidentId), 'timeline.ndjson'), `${JSON.stringify(full)}\n`);
   if (process.env.PROOF_QUIET !== '1') {

@@ -4,6 +4,7 @@ export * from './card.ts';
 export * from './hook.ts';
 export * from './llm.ts';
 export * from './lock.ts';
+export * from './milestones.ts';
 export * from './minimize.ts';
 export * from './objective.ts';
 export * from './reproduce.ts';

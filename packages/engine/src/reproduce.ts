@@ -1,7 +1,7 @@
 // Reproduce: session -> Kane objective -> run until Kane fails the SAME way -> confirm 3x.
 
 import { draftRepro, reviseRepro, toObjective } from './objective.ts';
-import { emit, saveIncident, writeJson } from './store.ts';
+import { emit, patchIncident, writeJson } from './store.ts';
 import type { Incident, Repro, RunRecord } from './types.ts';
 import { incidentSignature, PARALLEL, pool, verify } from './verify.ts';
 
@@ -26,7 +26,7 @@ export async function reproduce(
   const draft = await draftRepro(inc);
   if (!inc.title) {
     inc.title = draft.title;
-    saveIncident(inc);
+    patchIncident(inc.id, { title: draft.title });
   }
   let repro: Repro = { steps: draft.steps, expectation: draft.expectation };
   emit(inc.id, {
