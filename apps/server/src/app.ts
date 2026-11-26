@@ -22,6 +22,7 @@ import {
   incidentActions,
   incidentCrumbs,
   incidentPage,
+  isStatic,
   loadState,
   page,
   reporterPage,
@@ -52,7 +53,7 @@ export function createApp() {
   app.get('/', (c) => c.html(landing(listIncidents().map(loadState))));
   app.get('/incidents', (c) => {
     const nav = listIncidents().map(loadState);
-    return c.html(page('Incidents', home(nav), { nav }));
+    return c.html(page(isStatic() ? 'Example runs' : 'Incidents', home(nav), { nav }));
   });
 
   app.get('/incidents/:id', (c) => {

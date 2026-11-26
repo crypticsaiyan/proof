@@ -64,6 +64,8 @@ h1, h2, h3, p { margin: 0; }
 .btn:active { transform: scale(0.97); }
 .btn.primary { background: var(--text); color: #08090a; border-color: var(--text); }
 .btn.primary:hover { opacity: 0.9; }
+.example-note { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s3); padding: var(--s3) var(--s4); border: 1px solid var(--amber-line); border-radius: 8px; background: var(--amber-bg); color: var(--text-2); font-size: 13px; }
+.example-note b { color: var(--amber); font-weight: 500; }
 .content { padding: var(--s6); max-width: 1280px; display: grid; gap: var(--s5); }
 
 /* page head */

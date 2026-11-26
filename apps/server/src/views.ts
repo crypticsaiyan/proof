@@ -152,7 +152,7 @@ export function page(
 <div class="app">
   <aside class="side">
     <a class="brand" href="/"><i aria-hidden="true"></i>Proof</a>
-    <div class="side-h"><span>Incidents</span><span class="num">${opts.nav?.length ?? 0}</span></div>
+    <div class="side-h"><span>${isStatic() ? 'Example runs' : 'Incidents'}</span><span class="num">${opts.nav?.length ?? 0}</span></div>
     <nav aria-label="Incidents">${(opts.nav ?? []).map((s) => {
       const st = status(s);
       return html`<a class="item" href="/incidents/${s.inc.id}"${s.inc.id === opts.current ? raw(' aria-current="page"') : ''}><span class="dot ${st.tone}"></span><span class="t" title="${s.inc.title ?? s.inc.id}">${s.inc.title ?? s.inc.id}</span><span class="m">${st.text} · ${when(s.ms.captured ?? s.inc.createdAt)}</span></a>`;
@@ -161,7 +161,7 @@ export function page(
   </aside>
   <div class="main">
     <header class="topbar"><div class="crumbs">${opts.crumbs ?? html`<span>Overview</span>`}</div><div class="actions">${opts.actions ?? ''}</div></header>
-    <main id="main" class="content">${body}</main>
+    <main id="main" class="content">${isStatic() ? exampleNote() : ''}${body}</main>
   </div>
 </div>
 ${live ? raw(liveScript(opts.live as string)) : ''}
@@ -220,8 +220,8 @@ export function home(states: IncidentState[]) {
   const credits = states.reduce((n, s) => n + s.runs.reduce((m, r) => m + r.credits, 0), 0);
   const fixed = states.filter((s) => s.ms.prodVerified && !s.ms.reopened).length;
   return html`<div class="head" data-k="head" style="--i:0">
-  <h1>Incidents</h1>
-  <p class="sub">Broken user sessions, reproduced, fixed and proven by Kane CLI.</p>
+  <h1>${isStatic() ? 'Example runs' : 'Incidents'}</h1>
+  <p class="sub">${isStatic() ? 'Real bug reports from the demo shop, reproduced, fixed and proven by Kane CLI. Open one to follow it from session to production.' : 'Broken user sessions, reproduced, fixed and proven by Kane CLI.'}</p>
 </div>
 <section class="panel stats" data-k="stats" style="--i:1">
   <div class="stat"><span>Incidents</span><b>${states.length}</b></div>
@@ -230,7 +230,7 @@ export function home(states: IncidentState[]) {
   <div class="stat"><span>Kane credits</span><b>${Math.round(credits).toLocaleString('en')}</b></div>
 </section>
 <section class="panel" data-k="list" style="--i:2">
-  <div class="panel-h"><h2>All incidents</h2><span class="aside">Newest first</span></div>
+  <div class="panel-h"><h2>${isStatic() ? 'Recorded runs' : 'All incidents'}</h2><span class="aside">Newest first</span></div>
   ${
     states.length
       ? html`<div class="scroll"><table>
@@ -296,7 +296,8 @@ export function stepper(s: IncidentState) {
   const failed = s.tl.at(-1)?.stage === 'error';
   // After the PR, nothing runs until a person merges and deploys.
   const waiting = !!s.ms.shipped && !s.ms.prodVerified;
-  const firstPending = settled(s) || failed || waiting ? -1 : ms.findIndex((m) => !m.at);
+  // A static snapshot never runs anything, so no step is shown as running.
+  const firstPending = isStatic() || settled(s) || failed || waiting ? -1 : ms.findIndex((m) => !m.at);
   return html`<ol class="stepper" style="--n:${ms.length};list-style:none;margin:0" aria-label="Pipeline">${ms.map(
     (m, i) =>
       html`<li style="--i:${i}" class="step ${m.at ? 'done' : i === firstPending ? 'active' : 'pending'}${i === ms.length - 1 ? ' final' : ''}"><span class="node"></span><span class="l">${m.label}</span><span class="d">${m.d || (m.at ? '' : i === firstPending ? 'Running' : waiting ? 'After merge' : 'Pending')}</span>${m.at ? html`<time datetime="${m.at}" title="${when(m.at)}">${i === 0 || day(m.at) !== day(ms[i - 1].at) ? when(m.at) : hhmm(m.at)}</time>` : ''}</li>`,
@@ -304,7 +305,7 @@ export function stepper(s: IncidentState) {
 }
 
 export function incidentCrumbs(s: IncidentState) {
-  return html`<a href="/incidents">Incidents</a><span class="sep">/</span><span class="mono">${s.inc.id}</span>`;
+  return html`<a href="/incidents">${isStatic() ? 'Example runs' : 'Incidents'}</a><span class="sep">/</span><span class="mono">${s.inc.id}</span>`;
 }
 
 export function incidentActions(s: IncidentState) {

@@ -5,7 +5,7 @@
 import type { RunRecord } from '@proof/engine';
 import { html, raw } from 'hono/html';
 import { CSS, FONTS } from './styles.ts';
-import { badge, fileUrl, type IncidentState, poster, settled, status, stepper } from './views.ts';
+import { badge, fileUrl, type IncidentState, isStatic, poster, settled, status, stepper } from './views.ts';
 
 const REPO = 'https://github.com/crypticsaiyan/proof';
 const KANE = 'https://github.com/LambdaTest/kane-cli';
@@ -128,8 +128,19 @@ html:not(.updated) .hero > * { animation: rise 600ms var(--ease) both; animation
 html:not(.updated) .shot { animation: rise 900ms var(--ease) both; animation-delay: 280ms; }
 @media (prefers-reduced-motion: reduce) { html:not(.updated) .hero > *, html:not(.updated) .shot { animation: fade 200ms ease both; } }
 
+.run { list-style: none; margin: 0; padding: 0; border-top: 1px solid var(--line); }
+.run li { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr); gap: var(--s6); align-items: start; padding: var(--s6) 0; border-bottom: 1px solid var(--line); }
+.run h3 { font-size: 17px; font-weight: 600; letter-spacing: -0.01em; }
+.run h3 small { display: block; margin-bottom: var(--s2); color: var(--text-3); font-family: var(--mono); font-size: 13px; font-weight: 400; }
+.run p { margin-top: var(--s2); color: var(--text-2); max-width: 44ch; }
+.run .code { border-radius: 10px; }
+.copy { font: inherit; color: var(--text-3); background: none; border: 0; padding: 0; cursor: pointer; transition: color 150ms ease; }
+.copy:hover { color: var(--text); }
+.run-foot { padding-top: var(--s6); color: var(--text-2); }
+
 @media (max-width: 960px) {
   .lnav nav { display: none; }
+  .run li { grid-template-columns: 1fr; gap: var(--s4); }
   .shot-body { grid-template-columns: 1fr; }
   .shot-side { display: none; }
   .bento { grid-template-columns: 1fr; }
@@ -151,6 +162,63 @@ html:not(.updated) .shot { animation: rise 900ms var(--ease) both; animation-del
   .cmd { display: none; }
 }
 `;
+
+const SHOP = 'https://github.com/crypticsaiyan/proof-demo-shop';
+
+/** Steps to run the example yourself, against the shop at the commit that still has the bug. */
+const RUN: { h: string; p: string; code: string }[] = [
+  {
+    h: 'Install the tools',
+    p: 'Node 24+, pnpm, Google Chrome, ffmpeg and Kane CLI. The fix race also uses the claude and codex CLIs. Proof reuses their logins, so there are no API keys to set.',
+    code: 'npm install -g @testmuai/kane-cli\nkane-cli login',
+  },
+  {
+    h: 'Get Proof and the demo shop',
+    p: 'The demo-bug tag is the shop before the fix, so the coupon bug from the example run is still there.',
+    code: `git clone ${REPO} && cd proof\npnpm install && node packages/sdk/build.ts\n\ngit clone ${SHOP} ../proof-demo-shop\ngit -C ../proof-demo-shop reset --hard demo-bug\n(cd ../proof-demo-shop && pnpm install && PORT=3100 pnpm start) &`,
+  },
+  {
+    h: 'Open your own console',
+    p: 'Unlike this copy, it is live: each stage shows up as Kane finishes it.',
+    code: 'pnpm --filter @proof/server start &\n# open http://localhost:4600',
+  },
+  {
+    h: 'Reproduce, minimize, lock',
+    p: 'Kane replays the captured session until it fails the same way 3 times, Proof shrinks it to the fewest steps, then hash-locks the test.',
+    code: 'node packages/cli/src/proof.ts repro fixtures/incidents/checkout-negative-total.json',
+  },
+  {
+    h: 'Race the agents',
+    p: 'Claude Code, Codex and Haiku each fix it in their own worktree. Kane judges every patch, then the winner is reverted and Kane must fail again.',
+    code: 'node packages/cli/src/proof.ts fix inc-checkout-negative-total --repo ../proof-demo-shop',
+  },
+  {
+    h: 'Ship and verify (optional)',
+    p: 'Point ../proof-demo-shop at a fork you can push to and log in to gh. After you merge and deploy, Kane re-runs the locked test on production.',
+    code: 'node packages/cli/src/proof.ts ship inc-checkout-negative-total --repo ../proof-demo-shop --draft\nnode packages/cli/src/proof.ts verify-prod inc-checkout-negative-total --url https://your-deploy.example',
+  },
+];
+
+const COPY_JS = `document.addEventListener('click', (e) => {
+  const b = e.target.closest('.copy');
+  if (!b) return;
+  const text = b.closest('.code').querySelector('pre').innerText.split('\\n').filter((l) => !l.startsWith('#')).join('\\n').trim();
+  navigator.clipboard.writeText(text).then(() => { b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1500); });
+});`;
+
+function runSection() {
+  return html`<section class="wrap" id="run">
+  <div class="split">
+    <h2><span class="eyebrow">Run it yourself</span>The same loop, on your machine</h2>
+    <p>${isStatic() ? 'This site is a recording. ' : ''}Proof runs locally with your own Kane CLI login. A full run takes about 30 minutes and uses your Kane credits and agent subscriptions.</p>
+  </div>
+  <ol class="run">${RUN.map(
+    (r, i) =>
+      html`<li><div><h3><small>0${i + 1}</small>${r.h}</h3><p>${r.p}</p></div><div class="code"><div class="code-h"><span>terminal</span><button class="copy" type="button">Copy</button></div><pre>${r.code.split('\n').map((l) => (l.startsWith('#') ? html`<span class="c">${l}</span>\n` : html`${l}\n`))}</pre></div></li>`,
+  )}</ol>
+  <p class="run-foot">On your own app: add a <code>proof.config.json</code> and the capture script tag. <a class="link" href="${REPO}#making-your-app-proof-ready">Setup in the README</a>.</p>
+</section>`;
+}
 
 function tile(id: string, label: string, run?: RunRecord) {
   const img = fileUrl(id, poster(run?.captioned ?? run?.video));
@@ -176,6 +244,7 @@ export function landing(all: IncidentState[]) {
   const ms = s?.ms ?? {};
   const prod = s?.runs.findLast((x) => x.kind === 'prod');
   const prodOk = !!prod && prod.status === 'passed' && !prod.matched;
+  const example = inc ? `/incidents/${inc.id}` : '/incidents';
 
   return html`<!doctype html>
 <html lang="en">
@@ -193,8 +262,8 @@ export function landing(all: IncidentState[]) {
 <a class="skip" href="#main">Skip to content</a>
 <header class="lnav"><div class="wrap">
   <a class="brand" href="/"><i aria-hidden="true"></i>Proof</a>
-  <nav aria-label="Sections"><a href="#how">How it works</a><a href="#lock">Anti-cheat</a><a href="${KANE}">Kane CLI</a></nav>
-  <div class="end"><a class="btn-l sm" href="${REPO}">GitHub</a><a class="btn-l sm primary" href="/incidents">Open console</a></div>
+  <nav aria-label="Sections"><a href="#how">How it works</a><a href="#lock">Anti-cheat</a><a href="#run">Run it</a><a href="${KANE}">Kane CLI</a></nav>
+  <div class="end"><a class="btn-l sm" href="${REPO}">GitHub</a>${isStatic() ? html`<a class="btn-l sm primary" href="${example}">Example run</a>` : html`<a class="btn-l sm primary" href="/incidents">Open console</a>`}</div>
 </div></header>
 
 <main id="main">
@@ -202,7 +271,7 @@ export function landing(all: IncidentState[]) {
   <a class="pill" href="${KANE}" style="--i:0"><span class="mk" aria-hidden="true"></span>Every stage verified by Kane CLI</a>
   <h1 style="--i:1">From broken session to <em>proven</em> fix</h1>
   <p class="lead" style="--i:2">Proof takes what a user did when your app broke, has Kane CLI reproduce it in a real browser, lets three coding agents race to fix it, and opens a PR only for the fix Kane can show working.</p>
-  <div class="cta" style="--i:3"><a class="btn-l primary" href="/incidents">Open the console</a><a class="btn-l" href="${REPO}">Read the code</a><code class="cmd"><b>$</b> proof repro session.json</code></div>
+  <div class="cta" style="--i:3">${isStatic() ? html`<a class="btn-l primary" href="${example}">See an example run</a><a class="btn-l" href="#run">Run it yourself</a>` : html`<a class="btn-l primary" href="/incidents">Open the console</a><a class="btn-l" href="${REPO}">Read the code</a>`}<code class="cmd"><b>$</b> proof repro session.json</code></div>
 
   ${
     s && inc
@@ -307,13 +376,16 @@ export function landing(all: IncidentState[]) {
   </div>
 </section>
 
+${runSection()}
+
 <section class="wrap closing">
   <h2>Follow one bug all the way</h2>
   <p>Videos, Kane runs, the minimal repro and the tournament from one captured session on the demo shop.</p>
-  <div class="cta">${inc ? html`<a class="btn-l primary" href="/incidents/${inc.id}">Open the incident</a>` : ''}<a class="btn-l" href="/incidents">All incidents</a></div>
+  <div class="cta">${inc ? html`<a class="btn-l primary" href="/incidents/${inc.id}">${isStatic() ? 'See the example run' : 'Open the incident'}</a>` : ''}<a class="btn-l" href="/incidents">${isStatic() ? 'All example runs' : 'All incidents'}</a></div>
 </section>
 </main>
 
+<script>${raw(COPY_JS)}</script>
 <footer class="lfoot"><div class="wrap"><span>Proof. Built on <a class="link" href="${KANE}">Kane CLI</a>. MIT.</span><a href="${REPO}">GitHub</a></div></footer>
 </body>
 </html>`;

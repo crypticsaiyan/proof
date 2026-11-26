@@ -9,6 +9,8 @@ user session ──► triage ──► reproduce x3 ──► minimize ──�
    (SDK)        (dedupe)      Kane            Kane         Kane judges        Kane            evidence pack      Kane          "here are your steps"
 ```
 
+**Example run:** https://proof-kane.vercel.app (a read-only recording of a real run; the steps below run it yourself).
+
 ## Why
 
 Most bug reports die at "cannot reproduce". When they do get fixed, nobody proves the fix fixed _that_ bug, or that the test was not quietly weakened to pass. Proof makes Kane the referee at every step, and the agents never get to grade their own work.
@@ -38,8 +40,9 @@ npm install -g @testmuai/kane-cli && kane-cli login
 git clone https://github.com/crypticsaiyan/proof && cd proof && pnpm install
 node packages/sdk/build.ts
 
-# the demo store with real bugs
+# the demo store, at the tag that still has the coupon bug
 git clone https://github.com/crypticsaiyan/proof-demo-shop ../proof-demo-shop
+git -C ../proof-demo-shop reset --hard demo-bug
 (cd ../proof-demo-shop && pnpm install && PORT=3100 pnpm start) &
 
 # dashboard on :4600
