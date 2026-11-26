@@ -53,7 +53,7 @@ export type IncidentState = {
   /** The hash-locked test, byte for byte. */
   lockedTest: string | null;
   t: TournamentResult | null;
-  ship: { pr: string; evidence?: string } | null;
+  ship: { pr: string; evidence?: string; at?: string } | null;
   notify: { name?: string; body: string; runId: string; delivered?: boolean } | null;
   blast: { rows: { label: string; dimension: string; affected: boolean; status: string }[] } | null;
 };
@@ -112,9 +112,22 @@ export function milestones(s: IncidentState) {
     { label: 'Minimized', at: m.minimized, d: m.minimized && s.minimal ? plural(s.minimal.to, 'step') : '' },
     { label: 'Fixed', at: m.fixed, d: m.fixed && w ? w.label : '' },
     { label: 'Proven', at: m.verified, d: m.verified ? 'Red on revert' : '' },
-    { label: 'PR opened', at: m.shipped, d: m.shipped && s.ship?.pr ? `#${s.ship.pr.split('/').pop()}` : '' },
+    // A later re-run clears the shipped milestone, but the PR it opened still exists.
+    {
+      label: 'PR opened',
+      at: m.shipped ?? s.ship?.at,
+      d: (m.shipped ?? s.ship?.at) && s.ship?.pr ? `#${s.ship.pr.split('/').pop()}` : '',
+    },
     { label: 'Green in prod', at: m.prodVerified, d: m.reopened ? 'Then reopened' : m.prodVerified ? reply : '' },
   ];
+}
+
+/** The hosted copy: recorded runs only, nothing can be started from it. */
+export const isStatic = () => process.env.PROOF_STATIC === '1';
+
+/** Shown on every read-only page so nobody mistakes the snapshot for the product. */
+function exampleNote() {
+  return html`<div class="example-note" role="note"><span><b>Example run.</b> Recorded from real Proof and Kane CLI runs on a demo shop. This copy is read-only: nothing runs here.</span><a class="btn primary" href="/#run">Run it yourself</a></div>`;
 }
 
 export function page(
@@ -122,7 +135,7 @@ export function page(
   body: H,
   opts: { live?: string; settled?: boolean; nav?: IncidentState[]; current?: string; crumbs?: H; actions?: H } = {},
 ) {
-  const live = opts.live && process.env.PROOF_STATIC !== '1' && !opts.settled;
+  const live = opts.live && !isStatic() && !opts.settled;
   return html`<!doctype html>
 <html lang="en"${opts.settled ? raw(' data-settled="1"') : ''}>
 <head>
